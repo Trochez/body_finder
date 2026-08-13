@@ -1,25 +1,38 @@
-body_finder Agent Instructions
+# Body Finder Agent Instructions
 
-Purpose
+## Purpose
 
-Managed documentation scaffold; product implementation blocked pending toolchain and repository bootstrap.
+Experimental Flutter research application for uncertainty-aware search-and-rescue technology development.
 
-Status
+## Current state
 
-**Managed** project registered in supreme-master workspace. Body Finder implementation plan reviewed on 2026-08-13, but execution is blocked because Flutter/Dart, `pubspec.yaml`, application source, and `.git` are absent.
+The repository is initialized and active. Flutter/Dart application source, Android/iOS/Linux targets, CI, release-artifact workflows, native capability probes, geometry utilities, session utilities, simulation scaffolding, and tests are present.
 
-Public contract surface
+## Working rules
 
-`index.md`
-`AGENTS.md`
-`docs/index.md`
+1. Never claim that an empty result proves absence.
+2. Never present synthetic simulation markers as real detections.
+3. Distinguish hardware presence, public API availability, permission state, and actual measurement availability.
+4. Do not claim raw Wi-Fi CSI or raw UWB access unless verified on the exact platform/API.
+5. Keep physical-device-dependent features behind runtime capability checks.
+6. Add tests for deterministic domain/application logic.
+7. Keep pull-request CI green before merging to `main`.
+8. Record physical device model and OS version for every hardware validation result.
 
-Current scope
+## Main project surfaces
 
-Documentation contract and implementation-readiness records only. See `docs/session-learnings-20260813.md` for verified session findings.
+- `lib/domain/`
+- `lib/application/`
+- `lib/infrastructure/`
+- `lib/presentation/`
+- `test/`
+- `docs/`
+- `.github/workflows/`
 
-Working rules
+## Validation commands
 
-1. Do not claim product implementation until Flutter project files and toolchain are present.
-2. Do not initialize or publish Git history without explicit repository bootstrap and remote verification.
-3. Update contract files when project implementation is initialized.
+```bash
+flutter pub get
+flutter analyze --no-fatal-infos --no-fatal-warnings
+flutter test
+```
