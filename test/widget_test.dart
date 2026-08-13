@@ -1,13 +1,13 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:body_finder/main.dart';
 
 void main() {
-  testWidgets('shows scientific safety status on launch', (tester) async {
+  testWidgets('shows app shell while native capabilities load', (tester) async {
     await tester.pumpWidget(const BodyFinderApp());
 
     expect(find.text('Body Finder'), findsOneWidget);
-    expect(find.text('Experimental anomaly mapping'), findsOneWidget);
-    expect(find.textContaining('not proof of presence or absence'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 }
