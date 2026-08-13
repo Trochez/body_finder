@@ -1,0 +1,24 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+
+# Build / caches
+build/
+.dart_tool/
+.packages
+.pub/
+pubspec.lock
+
+# Mobile outputs
+*.apk
+*.aab
+*.ipa
