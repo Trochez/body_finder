@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'presentation/capability_dashboard.dart';
+import 'presentation/universal_compatibility_dashboard.dart';
 
 void main() {
   runApp(const BodyFinderApp());
@@ -18,7 +18,7 @@ class BodyFinderApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
       ),
-      home: const CapabilityDashboard(),
+      home: const UniversalCompatibilityDashboard(),
     );
   }
 }
