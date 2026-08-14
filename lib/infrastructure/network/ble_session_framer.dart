@@ -35,7 +35,8 @@ class BleSessionFramer {
     final result = <Uint8List>[];
     for (var index = 0; index < count; index++) {
       final start = index * payloadBytes;
-      final end = (start + payloadBytes).clamp(0, message.length);
+      final candidateEnd = start + payloadBytes;
+      final end = candidateEnd < message.length ? candidateEnd : message.length;
       final chunk = Uint8List(headerBytes + end - start);
       chunk[0] = magic;
       chunk[1] = version;
