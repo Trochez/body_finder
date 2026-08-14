@@ -48,7 +48,7 @@ class _UniversalCompatibilityDashboardState
               return const Center(child: CircularProgressIndicator());
             }
             if (snapshot.hasError) {
-              return _CompatibilityMessage(
+              return const _CompatibilityMessage(
                 title: 'Compatibility scan unavailable',
                 message:
                     'The app can still launch. Retry the scan or continue with supported session/UI functions.',
@@ -57,6 +57,14 @@ class _UniversalCompatibilityDashboardState
 
             final node = snapshot.data!;
             final profile = selectOperatingProfile(node);
+            final exposed = node.capabilities
+                .where((value) => value.hardwareAvailable && value.apiAvailable)
+                .length;
+            final ready = node.capabilities
+                .where((value) => value.measurementAvailable)
+                .length;
+            final setupNeeded = ready < exposed;
+
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
@@ -72,14 +80,23 @@ class _UniversalCompatibilityDashboardState
                 Card(
                   child: ListTile(
                     leading: const Icon(Icons.smartphone),
-                    title: Text('Operating mode: ${profile.label}'),
-                    subtitle: Text(profile.description),
-                    trailing: const Text('JOIN'),
+                    title: Text('Hardware tier: ${profile.label}'),
+                    subtitle: Text(
+                      '${profile.description}\n$ready of $exposed exposed capabilities are currently ready.',
+                    ),
+                    isThreeLine: true,
+                    trailing: Text(setupNeeded ? 'SETUP' : 'READY'),
                   ),
                 ),
                 const SizedBox(height: 8),
                 Text('${node.platform} ${node.platformVersion}'),
-                Text('${profile.availableSensors.length} exposed capabilities'),
+                Text('$exposed exposed capabilities · $ready ready now'),
+                if (setupNeeded) ...[
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Some capabilities require permission or session setup before they can contribute measurements.',
+                  ),
+                ],
                 const SizedBox(height: 16),
                 FilledButton.icon(
                   onPressed: () => Navigator.of(context).push(
