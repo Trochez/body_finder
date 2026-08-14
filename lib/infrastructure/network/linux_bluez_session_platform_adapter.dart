@@ -309,9 +309,21 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
         if (deviceProperties == null) continue;
 
         final address = _stringProperty(deviceProperties['Address'])?.toUpperCase();
-        final peerNodeId = _nodeIdFromServiceData(deviceProperties['ServiceData']) ??
-            (address == null ? null : _livePeerNodeIdByAddress[address]);
+        final dbusNodeId = _nodeIdFromServiceData(deviceProperties['ServiceData']);
+        final liveNodeId = address == null ? null : _livePeerNodeIdByAddress[address];
+        final peerNodeId = dbusNodeId ?? liveNodeId;
         if (peerNodeId == null || peerNodeId == _localNodeId) continue;
+
+        // The Android advertisement now carries an optional freshness byte.
+        // When BlueZ exposes ServiceData through Device1, that typed D-Bus
+        // value is authoritative and should correct any stale/shifted identity
+        // previously inferred from bluetoothctl's human-readable monitor text.
+        if (address != null && dbusNodeId != null) {
+          if (liveNodeId != null && liveNodeId != dbusNodeId) {
+            _status('peerIdentityCorrectedFromDbus');
+          }
+          _livePeerNodeIdByAddress[address] = dbusNodeId;
+        }
 
         final devicePath = entry.key.value;
         final session = _peers.putIfAbsent(
@@ -371,6 +383,7 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
     final client = _client;
     if (client == null) return;
     peer.connecting = true;
+    peer.lastConnectError = null;
     _status('peerConnecting');
     final device = DBusRemoteObject(
       client,
@@ -379,16 +392,31 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
     );
     peer.device = device;
     try {
+      // Android is advertising a BLE GATT endpoint. On dual-mode peers BlueZ
+      // may otherwise choose BR/EDR when bearer timestamps are ambiguous.
+      // PreferredBearer is optional/experimental on some BlueZ releases, so a
+      // failure to set it must never block the ordinary Device1.Connect path.
+      try {
+        await device.setProperty(
+          _deviceInterface,
+          'PreferredBearer',
+          const DBusString('le'),
+        );
+      } on DBusMethodResponseException {
+        // Unsupported on older/non-experimental BlueZ; Connect still works.
+      }
+
       await device.callMethod(
         _deviceInterface,
         'Connect',
         const <DBusValue>[],
         replySignature: DBusSignature(''),
       );
+      peer.lastConnectError = null;
       _status('peerConnected');
-    } on DBusMethodResponseException {
-      // It may already be connected or still resolving services. Poll again.
-      _status('peerConnectPending');
+    } on DBusMethodResponseException catch (error) {
+      peer.lastConnectError = error.errorName;
+      _status(_connectErrorStatus(error.errorName));
     } finally {
       peer.connecting = false;
     }
@@ -475,6 +503,14 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       _status('peerCharacteristicMissing');
       return;
     }
+    final connectError = _peers.values
+        .map((peer) => peer.lastConnectError)
+        .whereType<String>()
+        .firstOrNull;
+    if (connectError != null) {
+      _status(_connectErrorStatus(connectError));
+      return;
+    }
     _status('peerConnectPending');
   }
 
@@ -483,6 +519,26 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
   void _clearCallbacks() {
     _onChunk = null;
     _onStatus = null;
+  }
+
+  static String _connectErrorStatus(String errorName) {
+    if (errorName.endsWith('.InProgress')) return 'peerConnectInProgress';
+    if (errorName.endsWith('.AlreadyConnected')) return 'peerConnected';
+    if (errorName.endsWith('.NotReady')) return 'peerConnectNotReady';
+    if (errorName.endsWith('.BREDR.ProfileUnavailable')) {
+      return 'peerConnectBredrProfileUnavailable';
+    }
+    if (errorName.endsWith('.AuthenticationFailed')) {
+      return 'peerConnectAuthenticationFailed';
+    }
+    if (errorName.endsWith('.AuthenticationRejected')) {
+      return 'peerConnectAuthenticationRejected';
+    }
+    if (errorName.endsWith('.ConnectionAttemptFailed')) {
+      return 'peerConnectAttemptFailed';
+    }
+    if (errorName.endsWith('.Failed')) return 'peerConnectFailed';
+    return 'peerConnectError';
   }
 
   static DBusValue? _property(Map<String, DBusValue>? properties, String name) =>
@@ -520,8 +576,11 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
         .map((entry) => entry.value)
         .firstOrNull;
     final bytes = _byteArray(raw);
-    if (bytes == null || bytes.length != 8) return null;
-    return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+    if (bytes == null || bytes.length < 8) return null;
+    return bytes
+        .take(8)
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
   }
 }
 
@@ -540,6 +599,7 @@ class _BluezPeerSession {
   bool connecting = false;
   bool connected = false;
   bool servicesResolved = false;
+  String? lastConnectError;
 }
 
 extension _FirstOrNull<T> on Iterable<T> {

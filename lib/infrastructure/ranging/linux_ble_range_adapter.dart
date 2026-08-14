@@ -263,16 +263,22 @@ class LinuxBleRangeAdapter {
   }
 
   /// Parses the payload line that follows Body Finder's BlueZ ServiceData
-  /// header. Only the first eight bytes are the persistent 16-hex node id.
+  /// header. The persistent node ID is eight bytes. Physical validation with
+  /// the nine-byte (ID + freshness) Android advertisement showed one BlueZ
+  /// monitor form with an additional leading 0x10 byte. Only normalize that
+  /// prefix when at least ten byte tokens are present; an ordinary nine-byte
+  /// payload whose legitimate node ID starts with 0x10 must remain untouched.
   static String? parseNodeIdFromServiceDataBytes(String text) {
     final clean = stripAnsi(text).toLowerCase().replaceAll('0x', ' ');
-    final bytes = RegExp(r'\b([0-9a-f]{2})\b')
+    var bytes = RegExp(r'\b([0-9a-f]{2})\b')
         .allMatches(clean)
         .map((match) => match.group(1)!)
-        .take(8)
         .toList(growable: false);
-    if (bytes.length != 8) return null;
-    return bytes.join();
+    if (bytes.length >= 10 && bytes.first == '10') {
+      bytes = bytes.skip(1).toList(growable: false);
+    }
+    if (bytes.length < 8) return null;
+    return bytes.take(8).join();
   }
 
   static String? parseNodeIdFromInfo(String text) {
