@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import '../../application/geometry/bootstrap_layout_solver.dart';
 import '../../application/geometry/relative_position_solver.dart';
 import '../../application/session/coordinator_election.dart';
 import '../../application/session/peer_registry.dart';
 import '../../domain/geometry/range_observation.dart';
+import 'session_transport.dart';
+import 'udp_lan_transport.dart';
 
 class PeerDiscoverySnapshot {
   const PeerDiscoverySnapshot({
@@ -42,14 +45,22 @@ class PeerDiscoverySnapshot {
 
 typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
 
+/// Session membership, coordinator election and shared range-graph engine.
+///
+/// The historical class name is retained for source compatibility, but the
+/// implementation is no longer coupled to LAN/UDP. Session messages can be
+/// carried by any [SessionTransport]. LAN is only the default opportunistic
+/// fast path until the BLE control transport is enabled.
 class LanPeerDiscovery {
   LanPeerDiscovery({
     PeerDiscoveryListener? onChanged,
     String? nodeId,
     String? platform,
+    List<SessionTransport>? transports,
   })  : onChanged = onChanged,
         nodeId = nodeId ?? _newNodeId(),
-        platform = platform ?? Platform.operatingSystem;
+        platform = platform ?? Platform.operatingSystem,
+        _transports = transports ?? <SessionTransport>[UdpLanTransport(port: port)];
 
   static const int port = 45892;
   static const String protocol = 'body_finder_peer_v1';
@@ -60,18 +71,22 @@ class LanPeerDiscovery {
   final PeerDiscoveryListener? onChanged;
   final String nodeId;
   final String platform;
+  final List<SessionTransport> _transports;
   final PeerRegistry _registry = PeerRegistry();
   final RelativePositionSolver _positionSolver = const RelativePositionSolver();
   final BootstrapLayoutSolver _bootstrapLayoutSolver = const BootstrapLayoutSolver();
   final Map<String, RangeObservation> _localRanges = {};
   final Map<String, _ReceivedRange> _ranges = {};
 
-  RawDatagramSocket? _socket;
-  StreamSubscription<RawSocketEvent>? _socketSubscription;
   Timer? _announceTimer;
   Timer? _expireTimer;
 
-  bool get isRunning => _socket != null;
+  bool get isRunning => _transports.any((transport) => transport.isRunning);
+
+  Set<String> get activeTransportIds => _transports
+      .where((transport) => transport.isRunning)
+      .map((transport) => transport.id)
+      .toSet();
 
   PeerDiscoverySnapshot get snapshot {
     final activeIds = _registry.peers.map((peer) => peer.id).toSet();
@@ -105,15 +120,22 @@ class LanPeerDiscovery {
   Future<void> start() async {
     if (isRunning) return;
 
-    final socket = await RawDatagramSocket.bind(
-      InternetAddress.anyIPv4,
-      port,
-      reuseAddress: true,
-    );
-    socket.broadcastEnabled = true;
-    _socket = socket;
+    Object? lastError;
+    var startedCount = 0;
+    for (final transport in _transports) {
+      try {
+        await transport.start(onMessage: _handleTransportPayload);
+        if (transport.isRunning) startedCount++;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (startedCount == 0) {
+      throw StateError(
+        'No Body Finder session transport could start${lastError == null ? '' : ': $lastError'}',
+      );
+    }
 
-    _socketSubscription = socket.listen(_handleSocketEvent);
     _refreshLocalRecord();
     _announce();
 
@@ -130,11 +152,9 @@ class LanPeerDiscovery {
     _announceTimer = null;
     _expireTimer = null;
 
-    await _socketSubscription?.cancel();
-    _socketSubscription = null;
-
-    _socket?.close();
-    _socket = null;
+    for (final transport in _transports) {
+      await transport.stop();
+    }
   }
 
   void publishLocalRange({
@@ -163,18 +183,9 @@ class LanPeerDiscovery {
     _emit();
   }
 
-  void _handleSocketEvent(RawSocketEvent event) {
-    if (event != RawSocketEvent.read) return;
-
-    Datagram? datagram;
-    while ((datagram = _socket?.receive()) != null) {
-      _handleDatagram(datagram!);
-    }
-  }
-
-  void _handleDatagram(Datagram datagram) {
+  void _handleTransportPayload(Uint8List payload) {
     try {
-      final decoded = jsonDecode(utf8.decode(datagram.data));
+      final decoded = jsonDecode(utf8.decode(payload));
       if (decoded is! Map<String, dynamic>) return;
       if (decoded['protocol'] != protocol) return;
 
@@ -198,13 +209,12 @@ class LanPeerDiscovery {
       }
       _emit();
     } on FormatException {
-      // Ignore unrelated LAN traffic on the discovery port.
+      // Ignore unrelated or malformed traffic from any session transport.
     }
   }
 
   void _announce() {
-    final socket = _socket;
-    if (socket == null) return;
+    if (!isRunning) return;
 
     _refreshLocalRecord();
     final now = _nowMicros();
@@ -223,7 +233,7 @@ class LanPeerDiscovery {
       _storeRange(refreshed);
     }
 
-    final payload = utf8.encode(jsonEncode({
+    final payload = Uint8List.fromList(utf8.encode(jsonEncode({
       'protocol': protocol,
       'nodeId': nodeId,
       'platform': platform,
@@ -236,13 +246,11 @@ class LanPeerDiscovery {
                 'source': range.source.name,
               })
           .toList(growable: false),
-    }));
+    })));
 
-    socket.send(
-      payload,
-      InternetAddress('255.255.255.255'),
-      port,
-    );
+    for (final transport in _transports.where((value) => value.isRunning)) {
+      unawaited(transport.broadcast(payload));
+    }
     _emit();
   }
 
