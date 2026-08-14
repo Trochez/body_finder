@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../application/orchestration/portability_policy.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
+import '../infrastructure/ranging/ble_range_adapter.dart';
 import 'capability_dashboard.dart';
 import 'node_geometry_panel.dart';
 
@@ -21,12 +24,14 @@ class _UniversalCompatibilityDashboardState
     extends State<UniversalCompatibilityDashboard> {
   late final SensorCapabilityManager _manager;
   late final LanPeerDiscovery _discovery;
+  late final BleRangeAdapter _bleRanging;
   late Future<NodeCapabilities> _scan;
 
   PeerDiscoverySnapshot? _peerSnapshot;
   bool _sessionStarting = false;
   bool _sessionRunning = false;
   String? _sessionError;
+  String _bleRangingStatus = 'idle';
 
   @override
   void initState() {
@@ -34,11 +39,13 @@ class _UniversalCompatibilityDashboardState
     _manager = widget.manager ?? SensorCapabilityManager();
     _scan = _manager.scan();
     _discovery = LanPeerDiscovery(onChanged: _onPeersChanged);
+    _bleRanging = BleRangeAdapter();
   }
 
   @override
   void dispose() {
-    _discovery.stop();
+    unawaited(_bleRanging.stop());
+    unawaited(_discovery.stop());
     super.dispose();
   }
 
@@ -47,6 +54,27 @@ class _UniversalCompatibilityDashboardState
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
+  }
+
+  void _onBleStatus(String status) {
+    if (!mounted) return;
+    setState(() => _bleRangingStatus = status);
+  }
+
+  Future<void> _startAutomaticRanging() async {
+    _onBleStatus('starting');
+    await _bleRanging.start(
+      nodeId: _discovery.nodeId,
+      onStatus: _onBleStatus,
+      onRange: (update) {
+        _discovery.publishLocalRange(
+          peerNodeId: update.peerNodeId,
+          distanceMeters: update.distanceMeters,
+          sigmaMeters: update.sigmaMeters,
+          source: BleRangeAdapter.source,
+        );
+      },
+    );
   }
 
   Future<void> _startSession() async {
@@ -64,6 +92,7 @@ class _UniversalCompatibilityDashboardState
         _sessionRunning = true;
         _peerSnapshot = _discovery.snapshot;
       });
+      unawaited(_startAutomaticRanging());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -75,12 +104,14 @@ class _UniversalCompatibilityDashboardState
   }
 
   Future<void> _stopSession() async {
+    await _bleRanging.stop();
     await _discovery.stop();
     if (!mounted) return;
     setState(() {
       _sessionRunning = false;
       _peerSnapshot = null;
       _sessionError = null;
+      _bleRangingStatus = 'idle';
     });
   }
 
@@ -169,7 +200,7 @@ class _UniversalCompatibilityDashboardState
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Put every test device on the same local network. Wi-Fi and Ethernet participants can coexist. Body Finder exchanges local-only discovery beacons and removes nodes automatically when their heartbeat disappears.',
+                  'Put every test device on the same local network. Wi-Fi and Ethernet participants can coexist. Nodes may join or leave at any time; the active topology and relative positioning graph update continuously.',
                 ),
                 const SizedBox(height: 12),
                 Card(
@@ -207,6 +238,7 @@ class _UniversalCompatibilityDashboardState
                           Text(
                             'Coordinator: ${_shortId(_peerSnapshot!.coordinatorId)}',
                           ),
+                          Text('BLE automatic ranging: $_bleRangingStatus'),
                           const SizedBox(height: 8),
                           Wrap(
                             spacing: 8,
