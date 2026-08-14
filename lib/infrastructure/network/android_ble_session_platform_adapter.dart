@@ -179,8 +179,10 @@ class AndroidBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
     switch (side) {
       case _TransportSide.server:
         _serverRunning = value;
+        break;
       case _TransportSide.client:
         _clientRunning = value;
+        break;
     }
   }
 
