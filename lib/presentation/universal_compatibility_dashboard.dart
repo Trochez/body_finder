@@ -82,6 +82,11 @@ class _UniversalCompatibilityDashboardState
       rangeEdgeCount: snapshot.rangeObservationCount,
     );
     _validationRecorder.recordTransports(_discovery.activeTransportIds);
+    _validationRecorder.recordTransportDiagnostics(
+      pathStatuses: _discovery.transportPathStatuses,
+      relayedMessageCount: _discovery.relayedMessageCount,
+      duplicateMessageCount: _discovery.duplicateMessageCount,
+    );
   }
 
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
@@ -288,6 +293,9 @@ class _UniversalCompatibilityDashboardState
                           Text(
                             'Active transport(s): ${_discovery.activeTransportIds.join(', ')} · transport only',
                           ),
+                          Text(
+                            'Transport status: ${_formatTransportStatuses(_discovery.transportPathStatuses)}',
+                          ),
                           Text('BLE automatic ranging: $_bleRangingStatus'),
                           const SizedBox(height: 8),
                           Wrap(
@@ -376,6 +384,13 @@ class _UniversalCompatibilityDashboardState
   static String _shortId(String? value) {
     if (value == null || value.isEmpty) return 'none';
     return value.length <= 8 ? value : value.substring(0, 8);
+  }
+
+  static String _formatTransportStatuses(Map<String, String> statuses) {
+    if (statuses.isEmpty) return 'none';
+    return statuses.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .join(', ');
   }
 }
 
