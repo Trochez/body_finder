@@ -120,12 +120,14 @@ class LanPeerDiscovery {
       if (remoteNodeId == nodeId) return;
 
       final remotePlatform = decoded['platform'];
+      final hasPosition = decoded.containsKey('position');
       final remotePosition = _decodePosition(decoded['position']);
       _registry.seen(
         remoteNodeId,
         _nowMicros(),
         platform: remotePlatform is String ? remotePlatform : null,
         position: remotePosition,
+        positionProvided: hasPosition,
       );
       _emit();
     } on FormatException {
@@ -142,7 +144,7 @@ class LanPeerDiscovery {
       'protocol': protocol,
       'nodeId': nodeId,
       'platform': platform,
-      if (_localPosition != null) 'position': _localPosition!.toJson(),
+      'position': _localPosition?.toJson(),
       'timestampMicros': _nowMicros(),
     }));
 
@@ -160,6 +162,7 @@ class LanPeerDiscovery {
       _nowMicros(),
       platform: platform,
       position: _localPosition,
+      positionProvided: true,
     );
   }
 
