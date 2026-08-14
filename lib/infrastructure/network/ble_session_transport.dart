@@ -123,8 +123,8 @@ class BleSessionTransport implements SessionTransport {
     );
     if (complete == null) return;
 
-    final binder = _platformAdapter;
-    if (binder is BleSessionPeerIdentityBinder) {
+    if (_platformAdapter is BleSessionPeerIdentityBinder) {
+      final binder = _platformAdapter as BleSessionPeerIdentityBinder;
       final peerNodeId = _peerNodeIdFromPayload(complete);
       if (peerNodeId != null) {
         binder.bindPeerIdentity(
