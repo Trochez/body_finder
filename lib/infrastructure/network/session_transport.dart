@@ -26,8 +26,11 @@ abstract interface class SessionTransport {
 /// Optional diagnostics contract for transports that multiplex or relay across
 /// multiple physical communication paths.
 ///
-/// Path identifiers describe communication only; they never imply sensing
-/// capability or physical ranging evidence.
+/// Path identifiers and statuses describe communication only; they never imply
+/// sensing capability or physical ranging evidence.
 abstract interface class SessionTransportDiagnostics {
   Set<String> get activePathIds;
+  Map<String, String> get pathStatuses;
+  int get relayedMessageCount;
+  int get duplicateMessageCount;
 }

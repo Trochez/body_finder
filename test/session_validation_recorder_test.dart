@@ -33,7 +33,11 @@ void main() {
       rssiDbm: -82,
       observedAtMicros: 2,
     );
-    recorder.recordRelayStatistics(
+    recorder.recordTransportDiagnostics(
+      pathStatuses: const <String, String>{
+        'bleControl': 'peerSubscribed',
+        'lanUdp': 'started',
+      },
       relayedMessageCount: 12,
       duplicateMessageCount: 5,
     );
@@ -44,6 +48,8 @@ void main() {
     expect(report.maxRangeEdgeCount, 1);
     expect(report.rangeSampleCount, 2);
     expect(report.observedTransportIds, containsAll(<String>{'bleControl', 'lanUdp'}));
+    expect(report.transportStatuses['bleControl'], 'peerSubscribed');
+    expect(report.transportStatuses['lanUdp'], 'started');
     expect(report.minDistanceMeters, 0.49);
     expect(report.maxDistanceMeters, 11.67);
     expect(report.minRssiDbm, -82);
@@ -51,6 +57,7 @@ void main() {
     expect(report.relayedMessageCount, 12);
     expect(report.duplicateMessageCount, 5);
     expect(report.latestRangesByPeer['b']?.distanceMeters, 11.67);
+    expect(report.toPlainText(), contains('bleControl=peerSubscribed'));
     expect(report.toPlainText(), contains('not proof of body presence or absence'));
   });
 

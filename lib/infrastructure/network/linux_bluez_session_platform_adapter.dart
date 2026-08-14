@@ -133,13 +133,17 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       final characteristic = peer.characteristic;
       if (characteristic == null) continue;
       try {
+        // Session/control traffic must be reliable. BlueZ "request" maps to
+        // ATT Write Request (with response), so awaiting WriteValue provides
+        // per-chunk flow control and prevents bursts of write commands being
+        // dropped by the Android GATT server.
         await characteristic.callMethod(
           _characteristicInterface,
           'WriteValue',
           <DBusValue>[
             DBusArray.byte(chunk),
             DBusDict.stringVariant(<String, DBusValue>{
-              'type': const DBusString('command'),
+              'type': const DBusString('request'),
             }),
           ],
           replySignature: DBusSignature(''),
@@ -208,8 +212,15 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
         session.peerNodeId = peerNodeId;
 
         final connected = _boolProperty(deviceProperties['Connected']);
-        if (!connected && !session.connecting) {
-          await _connectPeer(session);
+        if (!connected) {
+          // Any cached GATT object belongs to the previous connection and must
+          // not prevent service re-binding after a reconnect.
+          if (session.characteristic != null) {
+            await _disposePeer(session);
+          }
+          if (!session.connecting) {
+            await _connectPeer(session);
+          }
         }
       }
 
@@ -313,7 +324,7 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
           replySignature: DBusSignature(''),
         );
       } on DBusMethodResponseException {
-        // Best effort during teardown.
+        // Best effort during teardown or after a remote disconnect.
       }
     }
     peer.characteristic = null;

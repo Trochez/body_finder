@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -21,6 +22,7 @@ import android.os.ParcelUuid
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.ArrayDeque
 import java.util.UUID
 
 /**
@@ -46,6 +48,11 @@ class BleSessionBridge(
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 
+    private data class PendingNotification(
+        val device: BluetoothDevice,
+        val value: ByteArray,
+    )
+
     private val channel = MethodChannel(messenger, CHANNEL)
     private val bluetoothManager =
         activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -56,6 +63,8 @@ class BleSessionBridge(
     private var pendingNodeId: String? = null
     private val connectedDevices = linkedSetOf<BluetoothDevice>()
     private val subscribedDevices = linkedSetOf<BluetoothDevice>()
+    private val notificationQueue = ArrayDeque<PendingNotification>()
+    private var notificationInFlight = false
     private var advertising = false
     private var running = false
 
@@ -202,21 +211,50 @@ class BleSessionBridge(
     }
 
     private fun sendChunk(value: ByteArray) {
+        if (value.isEmpty()) return
+        for (device in subscribedDevices.toList()) {
+            notificationQueue.addLast(
+                PendingNotification(device, value.copyOf()),
+            )
+        }
+        drainNotificationQueue()
+    }
+
+    private fun drainNotificationQueue() {
+        if (notificationInFlight) return
         val server = gattServer ?: return
         val characteristic = sessionCharacteristic ?: return
-        val targets = subscribedDevices.toList()
-        for (device in targets) {
-            try {
+
+        while (notificationQueue.isNotEmpty()) {
+            val pending = notificationQueue.removeFirst()
+            if (!subscribedDevices.contains(pending.device)) continue
+            val initiated = try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    server.notifyCharacteristicChanged(device, characteristic, false, value)
+                    server.notifyCharacteristicChanged(
+                        pending.device,
+                        characteristic,
+                        false,
+                        pending.value,
+                    ) == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
-                    characteristic.value = value
+                    characteristic.value = pending.value
                     @Suppress("DEPRECATION")
-                    server.notifyCharacteristicChanged(device, characteristic, false)
+                    server.notifyCharacteristicChanged(
+                        pending.device,
+                        characteristic,
+                        false,
+                    )
                 }
             } catch (_: SecurityException) {
+                false
             } catch (_: IllegalArgumentException) {
+                false
+            }
+
+            if (initiated) {
+                notificationInFlight = true
+                return
             }
         }
     }
@@ -231,6 +269,8 @@ class BleSessionBridge(
         }
         advertising = false
 
+        notificationQueue.clear()
+        notificationInFlight = false
         val server = gattServer
         gattServer = null
         sessionCharacteristic = null
@@ -284,6 +324,13 @@ class BleSessionBridge(
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connectedDevices.remove(device)
                 subscribedDevices.remove(device)
+                notificationQueue.removeIf { it.device == device }
+                if (notificationInFlight) {
+                    // A disconnect can prevent onNotificationSent from arriving.
+                    // Release the queue so other peers are not permanently blocked.
+                    notificationInFlight = false
+                    drainNotificationQueue()
+                }
             }
             activity.runOnUiThread {
                 channel.invokeMethod(
@@ -347,6 +394,7 @@ class BleSessionBridge(
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, value)
             }
+            if (enabled) drainNotificationQueue()
             activity.runOnUiThread {
                 channel.invokeMethod(
                     "status",
@@ -357,6 +405,23 @@ class BleSessionBridge(
                     ),
                 )
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            notificationInFlight = false
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                activity.runOnUiThread {
+                    channel.invokeMethod(
+                        "status",
+                        mapOf(
+                            "status" to "notificationFailed",
+                            "sourceKey" to device.address,
+                            "gattStatus" to status,
+                        ),
+                    )
+                }
+            }
+            drainNotificationQueue()
         }
     }
 
