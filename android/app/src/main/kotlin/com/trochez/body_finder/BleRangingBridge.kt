@@ -136,7 +136,10 @@ class BleRangingBridge(
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            .setConnectable(false)
+            // The same advertisement is now also the discovery beacon for the
+            // Body Finder GATT session/control endpoint. Making it connectable
+            // does not change BLE RSSI's sensing semantics.
+            .setConnectable(true)
             .setTimeout(0)
             .build()
         val data = AdvertiseData.Builder()
