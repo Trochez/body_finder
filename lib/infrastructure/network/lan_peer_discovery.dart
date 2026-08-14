@@ -138,14 +138,12 @@ class LanPeerDiscovery {
     if (!observation.isValid) return;
     _localRanges[peerNodeId] = observation;
     _storeRange(observation);
-    if (isRunning) _announce();
     _emit();
   }
 
   void clearLocalRange(String peerNodeId) {
     _localRanges.remove(peerNodeId);
     _ranges.remove(_rangeStorageKey(nodeId, peerNodeId));
-    if (isRunning) _announce();
     _emit();
   }
 
@@ -195,7 +193,7 @@ class LanPeerDiscovery {
     _refreshLocalRecord();
     final now = _nowMicros();
     final refreshedLocalRanges = <RangeObservation>[];
-    for (final entry in _localRanges.entries) {
+    for (final entry in _localRanges.entries.toList(growable: false)) {
       final refreshed = RangeObservation(
         fromNodeId: nodeId,
         toNodeId: entry.key,
