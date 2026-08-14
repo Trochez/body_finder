@@ -19,10 +19,15 @@ class NodeGeometryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final positioned = snapshot.peers
+    final metricPositioned = snapshot.peers
         .where((peer) => peer.position != null)
         .toList(growable: false);
+    final bootstrapPositioned = snapshot.peers
+        .where((peer) => peer.bootstrapPosition != null)
+        .toList(growable: false);
     final unresolved = snapshot.unresolvedNodeIds.length;
+    final showMetricMap = snapshot.has2DFrame;
+    final displayedPeers = showMetricMap ? metricPositioned : bootstrapPositioned;
 
     return Card(
       child: Padding(
@@ -36,18 +41,31 @@ class NodeGeometryPanel extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             const Text(
-              'No manual XY entry is required. Body Finder derives a shared meter-scale frame only from real range observations exposed by participating devices.',
+              'Every active device receives an immediate shared bootstrap layout. Real UWB, Wi-Fi RTT, BLE RSSI, or external ranges replace it with a metric frame automatically when enough evidence exists.',
             ),
             const SizedBox(height: 12),
             Wrap(
               spacing: 12,
               runSpacing: 8,
               children: [
-                Chip(label: Text('${snapshot.rangeObservationCount} range edges')),
-                Chip(label: Text('${positioned.length}/${snapshot.nodeCount} positioned')),
                 Chip(
                   label: Text(
-                    snapshot.has2DFrame ? '2D FRAME READY' : '$unresolved UNRESOLVED',
+                    'INITIAL ${snapshot.bootstrapPositionedNodeCount}/${snapshot.nodeCount}',
+                  ),
+                ),
+                Chip(label: Text('${snapshot.rangeObservationCount} range edges')),
+                Chip(
+                  label: Text(
+                    'METRIC ${snapshot.positionedNodeCount}/${snapshot.nodeCount}',
+                  ),
+                ),
+                Chip(
+                  label: Text(
+                    snapshot.has2DFrame
+                        ? 'METRIC FRAME READY'
+                        : snapshot.hasBootstrap2DLayout
+                            ? 'BOOTSTRAP READY'
+                            : '$unresolved METRIC UNRESOLVED',
                   ),
                 ),
               ],
@@ -55,27 +73,32 @@ class NodeGeometryPanel extends StatelessWidget {
             const SizedBox(height: 12),
             if (snapshot.has2DFrame)
               const Text(
-                'The coordinate frame is relative: origin and rotation are selected deterministically from the active range graph. Accuracy depends on the ranging sources and geometry.',
+                'Metric frame active. Origin and rotation are selected deterministically from the active range graph. Accuracy depends on ranging source quality and geometry.',
+              )
+            else if (snapshot.hasBootstrap2DLayout)
+              const Text(
+                'Device-agnostic initial layout active. Coordinates marked “u” are normalized topology units, NOT meters and NOT measured physical positions. They are for session coordination only and are excluded from body-localization calculations until real ranging establishes a metric frame.',
               )
             else
               const Text(
-                'Waiting for enough independent distance observations. LAN heartbeat timing is not converted into physical distance. UWB, Wi-Fi RTT, BLE RSSI, or a compatible external ranging source must provide the required edges.',
+                'Initial topology layout is forming. A metric frame still requires independent physical distance observations; LAN heartbeat timing is never converted into fake distance.',
               ),
             const SizedBox(height: 12),
-            if (positioned.isNotEmpty)
+            if (displayedPeers.isNotEmpty)
               SizedBox(
                 height: 280,
                 width: double.infinity,
                 child: CustomPaint(
                   painter: _GeometryPainter(
-                    peers: positioned,
+                    peers: displayedPeers,
                     localNodeId: snapshot.localNodeId,
                     coordinatorId: snapshot.coordinatorId,
+                    useBootstrap: !showMetricMap,
                   ),
                 ),
               )
             else
-              const Text('No defensible metric position is available yet.'),
+              const Text('No shared layout is available yet.'),
             const SizedBox(height: 8),
             ...snapshot.peers.map(
               (peer) => Padding(
@@ -93,12 +116,18 @@ class NodeGeometryPanel extends StatelessWidget {
 
   static String _positionText(PeerRecord peer) {
     final position = peer.position;
-    if (position == null) return 'position unresolved';
-    final sigma = peer.positionSigmaMeters;
-    final uncertainty = sigma == null || !sigma.isFinite
-        ? 'uncertainty pending'
-        : '±${sigma.toStringAsFixed(2)} m';
-    return '(${position.x.toStringAsFixed(2)}, ${position.y.toStringAsFixed(2)}) m · $uncertainty';
+    if (position != null) {
+      final sigma = peer.positionSigmaMeters;
+      final uncertainty = sigma == null || !sigma.isFinite
+          ? 'uncertainty pending'
+          : '±${sigma.toStringAsFixed(2)} m';
+      return 'metric (${position.x.toStringAsFixed(2)}, ${position.y.toStringAsFixed(2)}) m · $uncertainty';
+    }
+    final bootstrap = peer.bootstrapPosition;
+    if (bootstrap != null) {
+      return 'initial (${bootstrap.x.toStringAsFixed(2)}, ${bootstrap.y.toStringAsFixed(2)}) u · metric unresolved';
+    }
+    return 'position unresolved';
   }
 
   static String _shortId(String value) =>
@@ -110,15 +139,20 @@ class _GeometryPainter extends CustomPainter {
     required this.peers,
     required this.localNodeId,
     required this.coordinatorId,
+    required this.useBootstrap,
   });
 
   final List<PeerRecord> peers;
   final String localNodeId;
   final String? coordinatorId;
+  final bool useBootstrap;
+
+  Vec2 _point(PeerRecord peer) =>
+      useBootstrap ? peer.bootstrapPosition! : peer.position!;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final points = peers.map((peer) => peer.position!).toList(growable: false);
+    final points = peers.map(_point).toList(growable: false);
     var minX = points.map((p) => p.x).reduce(math.min);
     var maxX = points.map((p) => p.x).reduce(math.max);
     var minY = points.map((p) => p.y).reduce(math.min);
@@ -163,6 +197,7 @@ class _GeometryPainter extends CustomPainter {
       canvas.drawLine(Offset(margin, y), Offset(size.width - margin, y), gridPaint);
     }
 
+    final frameColor = useBootstrap ? Colors.orange.shade700 : Colors.teal;
     if (points.length >= 3) {
       final boundary = convexBoundary(points).vertices;
       if (boundary.length >= 3) {
@@ -176,13 +211,13 @@ class _GeometryPainter extends CustomPainter {
         canvas.drawPath(
           path,
           Paint()
-            ..color = Colors.teal.withValues(alpha: 0.12)
+            ..color = frameColor.withValues(alpha: 0.10)
             ..style = PaintingStyle.fill,
         );
         canvas.drawPath(
           path,
           Paint()
-            ..color = Colors.teal
+            ..color = frameColor
             ..strokeWidth = 2
             ..style = PaintingStyle.stroke,
         );
@@ -190,11 +225,12 @@ class _GeometryPainter extends CustomPainter {
     }
 
     for (final peer in peers) {
-      final p = project(peer.position!);
+      final point = _point(peer);
+      final p = project(point);
       final isLocal = peer.id == localNodeId;
       final isCoordinator = peer.id == coordinatorId;
       final sigma = peer.positionSigmaMeters;
-      if (sigma != null && sigma.isFinite && sigma > 0) {
+      if (!useBootstrap && sigma != null && sigma.isFinite && sigma > 0) {
         final scaleX = drawableWidth / math.max(0.01, maxX - minX);
         final radius = math.min(45.0, math.max(4.0, sigma * scaleX));
         canvas.drawCircle(
@@ -208,9 +244,15 @@ class _GeometryPainter extends CustomPainter {
       canvas.drawCircle(
         p,
         isLocal ? 9 : 7,
-        Paint()..color = isCoordinator ? Colors.amber.shade800 : Colors.teal.shade700,
+        Paint()
+          ..color = isCoordinator
+              ? Colors.amber.shade800
+              : useBootstrap
+                  ? Colors.orange.shade700
+                  : Colors.teal.shade700,
       );
-      final label = '${_shortId(peer.id)}\n${peer.position!.x.toStringAsFixed(1)}, ${peer.position!.y.toStringAsFixed(1)} m';
+      final unit = useBootstrap ? 'u' : 'm';
+      final label = '${_shortId(peer.id)}\n${point.x.toStringAsFixed(1)}, ${point.y.toStringAsFixed(1)} $unit';
       final textPainter = TextPainter(
         text: TextSpan(
           text: label,
@@ -229,5 +271,6 @@ class _GeometryPainter extends CustomPainter {
   bool shouldRepaint(covariant _GeometryPainter oldDelegate) =>
       oldDelegate.peers != peers ||
       oldDelegate.localNodeId != localNodeId ||
-      oldDelegate.coordinatorId != coordinatorId;
+      oldDelegate.coordinatorId != coordinatorId ||
+      oldDelegate.useBootstrap != useBootstrap;
 }
