@@ -5,6 +5,7 @@ import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
 import 'capability_dashboard.dart';
+import 'node_geometry_panel.dart';
 
 class UniversalCompatibilityDashboard extends StatefulWidget {
   const UniversalCompatibilityDashboard({super.key, this.manager});
@@ -89,7 +90,7 @@ class _UniversalCompatibilityDashboardState
           title: const Text('Body Finder'),
           actions: [
             IconButton(
-              tooltip: 'Rescan phone',
+              tooltip: 'Rescan device',
               onPressed: _rescan,
               icon: const Icon(Icons.refresh),
             ),
@@ -123,17 +124,17 @@ class _UniversalCompatibilityDashboardState
               padding: const EdgeInsets.all(16),
               children: [
                 Text(
-                  'Universal phone compatibility',
+                  'Universal device compatibility',
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'No premium sensor is required to run Body Finder. The app automatically uses the capabilities exposed by this phone.',
+                  'No premium sensor is required to participate. Body Finder automatically uses the capabilities exposed by each device.',
                 ),
                 const SizedBox(height: 16),
                 Card(
                   child: ListTile(
-                    leading: const Icon(Icons.smartphone),
+                    leading: const Icon(Icons.devices),
                     title: Text('Hardware tier: ${profile.label}'),
                     subtitle: Text(
                       '${profile.description}\n$ready of $exposed exposed capabilities are currently ready.',
@@ -163,12 +164,12 @@ class _UniversalCompatibilityDashboardState
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'Nearby phone session',
+                  'Nearby node session',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'First transport: put every test phone on the same Wi-Fi network. Body Finder will exchange local-only discovery beacons and remove phones automatically when their heartbeat disappears.',
+                  'Put every test device on the same local network. Wi-Fi and Ethernet participants can coexist. Body Finder exchanges local-only discovery beacons and removes nodes automatically when their heartbeat disappears.',
                 ),
                 const SizedBox(height: 12),
                 Card(
@@ -193,7 +194,7 @@ class _UniversalCompatibilityDashboardState
                             ),
                             Text(
                               _sessionRunning
-                                  ? '${_peerSnapshot?.phoneCount ?? 1} PHONE${(_peerSnapshot?.phoneCount ?? 1) == 1 ? '' : 'S'}'
+                                  ? '${_peerSnapshot?.nodeCount ?? 1} NODE${(_peerSnapshot?.nodeCount ?? 1) == 1 ? '' : 'S'}'
                                   : 'OFF',
                             ),
                           ],
@@ -216,10 +217,14 @@ class _UniversalCompatibilityDashboardState
                                     avatar: Icon(
                                       peer.id == _peerSnapshot!.coordinatorId
                                           ? Icons.star
-                                          : Icons.smartphone,
+                                          : peer.platform == 'android'
+                                              ? Icons.smartphone
+                                              : Icons.computer,
                                       size: 18,
                                     ),
-                                    label: Text(_shortId(peer.id)),
+                                    label: Text(
+                                      '${_shortId(peer.id)} · ${peer.platform}',
+                                    ),
                                   ),
                                 )
                                 .toList(growable: false),
@@ -265,6 +270,13 @@ class _UniversalCompatibilityDashboardState
                     ),
                   ),
                 ),
+                if (_sessionRunning && _peerSnapshot != null) ...[
+                  const SizedBox(height: 12),
+                  NodeGeometryPanel(
+                    discovery: _discovery,
+                    snapshot: _peerSnapshot!,
+                  ),
+                ],
               ],
             );
           },
