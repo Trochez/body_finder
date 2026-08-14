@@ -32,7 +32,7 @@ class AndroidBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
         <String, dynamic>{'nodeId': nodeId},
       );
       final status = response?['status']?.toString() ?? 'unknown';
-      _running = status == 'started' || status == 'gattReady';
+      _running = _isRunningStatus(status);
       _onStatus?.call(status);
       return status;
     } on MissingPluginException {
@@ -77,8 +77,8 @@ class AndroidBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
       final args = call.arguments;
       if (args is Map) {
         final status = args['status']?.toString() ?? 'unknown';
-        if (status == 'gattReady' || status == 'started') _running = true;
-        if (status == 'stopped' || status == 'failed') _running = false;
+        if (_isRunningStatus(status)) _running = true;
+        if (_isTerminalFailureStatus(status)) _running = false;
         _onStatus?.call(status);
       }
       return;
@@ -104,4 +104,23 @@ class AndroidBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
       ),
     );
   }
+
+  static bool _isRunningStatus(String status) => <String>{
+        'started',
+        'advertisingReady',
+        'gattReady',
+        'readyForPeer',
+        'peerConnected',
+        'peerSubscribed',
+      }.contains(status);
+
+  static bool _isTerminalFailureStatus(String status) => <String>{
+        'stopped',
+        'failed',
+        'advertiseFailed',
+        'serviceAddFailed',
+        'bluetoothOff',
+        'permissionDenied',
+        'unavailable',
+      }.contains(status);
 }
