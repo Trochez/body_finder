@@ -95,6 +95,32 @@ class LanPeerDiscovery {
     return ids;
   }
 
+  Map<String, String> get transportPathStatuses {
+    final statuses = <String, String>{};
+    for (final transport in _transports) {
+      if (transport case SessionTransportDiagnostics diagnostics) {
+        statuses.addAll(diagnostics.pathStatuses);
+      } else {
+        statuses[transport.id] = transport.isRunning ? 'started' : 'stopped';
+      }
+    }
+    return statuses;
+  }
+
+  int get relayedMessageCount => _transports.fold<int>(0, (total, transport) {
+        if (transport case SessionTransportDiagnostics diagnostics) {
+          return total + diagnostics.relayedMessageCount;
+        }
+        return total;
+      });
+
+  int get duplicateMessageCount => _transports.fold<int>(0, (total, transport) {
+        if (transport case SessionTransportDiagnostics diagnostics) {
+          return total + diagnostics.duplicateMessageCount;
+        }
+        return total;
+      });
+
   PeerDiscoverySnapshot get snapshot {
     final activeIds = _registry.peers.map((peer) => peer.id).toSet();
     final metricSolution = _positionSolver.solve(
