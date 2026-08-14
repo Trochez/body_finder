@@ -22,7 +22,6 @@ class LinuxBleRangeAdapter {
   static const _pathLossExponent = 2.2;
   static const _fallbackTxPowerDbm = -59.0;
   static const _minEmitInterval = Duration(milliseconds: 500);
-  static const _inspectInterval = Duration(milliseconds: 700);
   static const _diagnosticInterval = Duration(seconds: 5);
 
   Process? _scanner;
@@ -35,10 +34,11 @@ class LinuxBleRangeAdapter {
 
   final Map<String, double> _smoothedRssi = <String, double>{};
   final Map<String, DateTime> _lastEmit = <String, DateTime>{};
-  final Map<String, DateTime> _lastInspect = <String, DateTime>{};
-  final Set<String> _inspecting = <String>{};
+  final Map<String, double> _latestRssiByAddress = <String, double>{};
+  final Map<String, String> _peerNodeIdByAddress = <String, String>{};
   final Set<String> _seenAddresses = <String>{};
   final Set<String> _matchedPeerIds = <String>{};
+  String? _pendingServiceDataAddress;
   String? _lastStatus;
 
   bool get started => _scanner != null;
@@ -94,12 +94,9 @@ class LinuxBleRangeAdapter {
         }
       });
 
-      // Do not apply a BlueZ UUID discovery filter here. Android currently
-      // carries the Body Finder UUID as ServiceData in a compact legacy BLE
-      // advertisement. Some BlueZ versions do not consider ServiceData UUIDs
-      // when applying the discovery UUID filter, which can hide valid peers.
-      // Scan all LE advertisements and validate Body Finder ServiceData after
-      // discovery instead.
+      // Scan all LE advertisements. Android carries the Body Finder UUID as
+      // service data and some BlueZ releases do not apply UUID discovery
+      // filters consistently to compact legacy advertisements.
       process.stdin.writeln('menu scan');
       process.stdin.writeln('transport le');
       process.stdin.writeln('duplicate-data on');
@@ -140,10 +137,11 @@ class LinuxBleRangeAdapter {
     _stderrSub = null;
     _smoothedRssi.clear();
     _lastEmit.clear();
-    _lastInspect.clear();
-    _inspecting.clear();
+    _latestRssiByAddress.clear();
+    _peerNodeIdByAddress.clear();
     _seenAddresses.clear();
     _matchedPeerIds.clear();
+    _pendingServiceDataAddress = null;
     _onRange = null;
     _onStatus = null;
     _localNodeId = null;
@@ -152,6 +150,29 @@ class LinuxBleRangeAdapter {
 
   void _handleScanLine(String line) {
     final clean = stripAnsi(line);
+
+    // BlueZ prints the service-data header and byte payload on separate lines:
+    // [CHG] Device AA:BB:... ServiceData.<uuid>:
+    //   d9 c6 fb 15 09 03 e0 59
+    final pendingAddress = _pendingServiceDataAddress;
+    if (pendingAddress != null && !clean.contains('Device ')) {
+      final nodeId = parseNodeIdFromServiceDataBytes(clean);
+      if (nodeId != null) {
+        _pendingServiceDataAddress = null;
+        if (nodeId != _localNodeId) {
+          _peerNodeIdByAddress[pendingAddress] = nodeId;
+          _matchedPeerIds.add(nodeId);
+          final rssi = _latestRssiByAddress[pendingAddress];
+          if (rssi == null) {
+            _status('peerMatchedWaitingRssi');
+          } else {
+            _emitRange(pendingAddress, nodeId, rssi);
+          }
+        }
+        return;
+      }
+    }
+
     final addressMatch = RegExp(
       r'Device\s+([0-9A-Fa-f:]{17})',
     ).firstMatch(clean);
@@ -160,34 +181,23 @@ class LinuxBleRangeAdapter {
     final address = addressMatch.group(1)!;
     _seenAddresses.add(address);
 
-    final rssiMatch = RegExp(r'RSSI:\s*(-?\d+)').firstMatch(clean);
-    if (rssiMatch == null) return;
-    final rssi = double.tryParse(rssiMatch.group(1)!);
-    if (rssi == null || !rssi.isFinite) return;
-
-    final now = DateTime.now();
-    final last = _lastInspect[address];
-    if (last != null && now.difference(last) < _inspectInterval) return;
-    if (!_inspecting.add(address)) return;
-    _lastInspect[address] = now;
-    unawaited(_inspectDevice(address, rssi).whenComplete(() {
-      _inspecting.remove(address);
-    }));
-  }
-
-  Future<void> _inspectDevice(String address, double rawRssi) async {
-    ProcessResult info;
-    try {
-      info = await Process.run('bluetoothctl', <String>['info', address]);
-    } on ProcessException {
+    final lower = clean.toLowerCase();
+    if (lower.contains('servicedata.${serviceUuid.toLowerCase()}')) {
+      _pendingServiceDataAddress = address;
       return;
     }
-    if (info.exitCode != 0) return;
 
-    final peerNodeId = parseNodeIdFromInfo(info.stdout.toString());
-    if (peerNodeId == null || peerNodeId == _localNodeId) return;
+    final rssi = parseRssiFromScanLine(clean);
+    if (rssi == null || !rssi.isFinite) return;
+    _latestRssiByAddress[address] = rssi;
 
-    _matchedPeerIds.add(peerNodeId);
+    final peerNodeId = _peerNodeIdByAddress[address];
+    if (peerNodeId != null && peerNodeId != _localNodeId) {
+      _emitRange(address, peerNodeId, rssi);
+    }
+  }
+
+  void _emitRange(String address, String peerNodeId, double rawRssi) {
     final previous = _smoothedRssi[peerNodeId];
     final filteredRssi = previous == null
         ? rawRssi
@@ -200,6 +210,7 @@ class LinuxBleRangeAdapter {
     final last = _lastEmit[peerNodeId];
     if (last != null && now.difference(last) < _minEmitInterval) return;
     _lastEmit[peerNodeId] = now;
+    _latestRssiByAddress[address] = rawRssi;
 
     _status('ranging');
     _onRange?.call(
@@ -236,26 +247,44 @@ class LinuxBleRangeAdapter {
     return value.clamp(0.10, 50.0).toDouble();
   }
 
-  static String? parseNodeIdFromInfo(String text) {
-    final clean = stripAnsi(text).toLowerCase();
-    final uuidIndex = clean.indexOf(serviceUuid);
-    if (uuidIndex < 0) return null;
+  /// Parses both common BlueZ RSSI forms:
+  /// `RSSI: -79` and `RSSI: 0xffffffb1 (-79)`.
+  static double? parseRssiFromScanLine(String text) {
+    final clean = stripAnsi(text);
+    final parenthesized = RegExp(r'RSSI:.*\((-?\d+)\)')
+        .firstMatch(clean)
+        ?.group(1);
+    if (parenthesized != null) return double.tryParse(parenthesized);
 
-    // BlueZ versions format ServiceData differently. Restrict parsing to the
-    // text following our UUID and accept either one compact 16-hex token or
-    // the first eight hexadecimal bytes in the service-data value.
-    final tail = clean.substring(uuidIndex + serviceUuid.length);
-    final direct = RegExp(r'\b(?:0x)?([0-9a-f]{16})\b').firstMatch(tail);
-    if (direct != null) return direct.group(1);
+    final direct = RegExp(r'RSSI:\s*(-?\d+)(?:\s|$)')
+        .firstMatch(clean)
+        ?.group(1);
+    return direct == null ? null : double.tryParse(direct);
+  }
 
-    final byteTail = tail.replaceAll('0x', ' ');
+  /// Parses the payload line that follows Body Finder's BlueZ ServiceData
+  /// header. Only the first eight bytes are the persistent 16-hex node id.
+  static String? parseNodeIdFromServiceDataBytes(String text) {
+    final clean = stripAnsi(text).toLowerCase().replaceAll('0x', ' ');
     final bytes = RegExp(r'\b([0-9a-f]{2})\b')
-        .allMatches(byteTail)
+        .allMatches(clean)
         .map((match) => match.group(1)!)
         .take(8)
         .toList(growable: false);
     if (bytes.length != 8) return null;
     return bytes.join();
+  }
+
+  static String? parseNodeIdFromInfo(String text) {
+    final clean = stripAnsi(text).toLowerCase();
+    final uuidIndex = clean.indexOf(serviceUuid);
+    if (uuidIndex < 0) return null;
+
+    final tail = clean.substring(uuidIndex + serviceUuid.length);
+    final direct = RegExp(r'\b(?:0x)?([0-9a-f]{16})\b').firstMatch(tail);
+    if (direct != null) return direct.group(1);
+
+    return parseNodeIdFromServiceDataBytes(tail);
   }
 
   static String stripAnsi(String value) => value.replaceAll(
