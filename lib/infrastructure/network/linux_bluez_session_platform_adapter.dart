@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dbus/dbus.dart';
 
+import '../ranging/linux_ble_range_adapter.dart';
 import 'ble_session_transport.dart';
 
 /// Native Linux BLE session client using BlueZ's public D-Bus interfaces.
@@ -11,6 +13,12 @@ import 'ble_session_transport.dart';
 /// It discovers Body Finder advertisements, connects to their GATT service,
 /// subscribes to the session characteristic and writes framed chunks back.
 /// The adapter is communication-only and never creates physical range data.
+///
+/// Physical validation showed that BlueZ's live bluetoothctl event stream
+/// reliably exposes Body Finder ServiceData even when the same data is not
+/// consistently present in ObjectManager snapshots. The control client now
+/// uses that proven live advertisement stream to map node IDs to BLE device
+/// addresses, while all connection/GATT traffic still uses BlueZ D-Bus.
 class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
   static const serviceUuid = '93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31';
   static const characteristicUuid = '93f3b61f-5e3c-4a73-9d10-8fbc5cf4de31';
@@ -23,11 +31,18 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
   DBusRemoteObjectManager? _manager;
   DBusRemoteObject? _adapter;
   Timer? _pollTimer;
+  Timer? _diagnosticTimer;
   bool _polling = false;
   bool _running = false;
   String? _localNodeId;
   BleSessionChunkHandler? _onChunk;
   BleSessionPlatformStatusHandler? _onStatus;
+
+  Process? _liveScanner;
+  StreamSubscription<String>? _liveStdoutSub;
+  StreamSubscription<String>? _liveStderrSub;
+  String? _pendingServiceDataAddress;
+  final Map<String, String> _livePeerNodeIdByAddress = <String, String>{};
 
   final Map<String, _BluezPeerSession> _peers = <String, _BluezPeerSession>{};
 
@@ -79,8 +94,8 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
         path: selected.key,
       );
       // Restrict discovery to LE, but do not filter by service UUID because
-      // some BlueZ versions do not apply UUID filters consistently to compact
-      // ServiceData advertisements (confirmed by the prior physical test).
+      // physical validation confirmed compact ServiceData advertisements are
+      // not exposed consistently by every BlueZ discovery API.
       try {
         await adapter.callMethod(
           _adapterInterface,
@@ -107,9 +122,20 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       _manager = manager;
       _adapter = adapter;
       _running = true;
+
+      // Use the same live BlueZ advertisement representation that has already
+      // been validated by the Linux BLE RSSI adapter on physical hardware.
+      // This feed only discovers nodeId <-> address mappings; D-Bus remains the
+      // authoritative connection/GATT API.
+      await _startLiveDiscoveryMonitor();
+
       _pollTimer = Timer.periodic(
-        const Duration(milliseconds: 900),
+        const Duration(milliseconds: 700),
         (_) => unawaited(_refreshPeers()),
+      );
+      _diagnosticTimer = Timer.periodic(
+        const Duration(seconds: 4),
+        (_) => _emitConnectionDiagnostic(),
       );
       unawaited(_refreshPeers());
       _status('started');
@@ -135,8 +161,7 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       try {
         // Session/control traffic must be reliable. BlueZ "request" maps to
         // ATT Write Request (with response), so awaiting WriteValue provides
-        // per-chunk flow control and prevents bursts of write commands being
-        // dropped by the Android GATT server.
+        // per-chunk flow control and prevents bursts being dropped.
         await characteristic.callMethod(
           _characteristicInterface,
           'WriteValue',
@@ -159,11 +184,17 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
     _running = false;
     _pollTimer?.cancel();
     _pollTimer = null;
+    _diagnosticTimer?.cancel();
+    _diagnosticTimer = null;
+
+    await _stopLiveDiscoveryMonitor();
 
     for (final peer in _peers.values.toList(growable: false)) {
       await _disposePeer(peer);
     }
     _peers.clear();
+    _livePeerNodeIdByAddress.clear();
+    _pendingServiceDataAddress = null;
 
     final adapter = _adapter;
     if (adapter != null) {
@@ -187,6 +218,84 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
     _clearCallbacks();
   }
 
+  Future<void> _startLiveDiscoveryMonitor() async {
+    try {
+      final process = await Process.start(
+        'bluetoothctl',
+        const <String>['--monitor'],
+      );
+      _liveScanner = process;
+      _liveStdoutSub = process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(_handleLiveScanLine);
+      _liveStderrSub = process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+        final clean = LinuxBleRangeAdapter.stripAnsi(line).toLowerCase();
+        if (clean.contains('failed')) _status('liveDiscoveryWarning');
+      });
+
+      process.stdin.writeln('menu scan');
+      process.stdin.writeln('transport le');
+      process.stdin.writeln('duplicate-data on');
+      process.stdin.writeln('back');
+      process.stdin.writeln('scan on');
+      await process.stdin.flush();
+      _status('scanningForGattPeer');
+    } on ProcessException {
+      // D-Bus discovery still remains active. Keep the transport alive and
+      // report that the physically validated live discovery fallback is absent.
+      _status('liveDiscoveryUnavailable');
+    }
+  }
+
+  Future<void> _stopLiveDiscoveryMonitor() async {
+    final process = _liveScanner;
+    _liveScanner = null;
+    if (process != null) {
+      try {
+        process.stdin.writeln('scan off');
+        process.stdin.writeln('quit');
+        await process.stdin.flush();
+      } catch (_) {
+        // Best effort during teardown.
+      }
+      process.kill();
+    }
+    await _liveStdoutSub?.cancel();
+    await _liveStderrSub?.cancel();
+    _liveStdoutSub = null;
+    _liveStderrSub = null;
+  }
+
+  void _handleLiveScanLine(String line) {
+    final clean = LinuxBleRangeAdapter.stripAnsi(line);
+    final pendingAddress = _pendingServiceDataAddress;
+    if (pendingAddress != null && !clean.contains('Device ')) {
+      final nodeId = LinuxBleRangeAdapter.parseNodeIdFromServiceDataBytes(clean);
+      if (nodeId != null) {
+        _pendingServiceDataAddress = null;
+        if (nodeId != _localNodeId) {
+          _livePeerNodeIdByAddress[pendingAddress] = nodeId;
+          _status('peerAdvertisementMatched');
+          unawaited(_refreshPeers());
+        }
+        return;
+      }
+    }
+
+    final addressMatch = RegExp(
+      r'Device\s+([0-9A-Fa-f:]{17})',
+    ).firstMatch(clean);
+    if (addressMatch == null) return;
+    final address = addressMatch.group(1)!.toUpperCase();
+    if (clean.toLowerCase().contains('servicedata.${serviceUuid.toLowerCase()}')) {
+      _pendingServiceDataAddress = address;
+    }
+  }
+
   Future<void> _refreshPeers() async {
     if (!_running || _polling) return;
     final manager = _manager;
@@ -198,7 +307,10 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       for (final entry in objects.entries) {
         final deviceProperties = entry.value[_deviceInterface];
         if (deviceProperties == null) continue;
-        final peerNodeId = _nodeIdFromServiceData(deviceProperties['ServiceData']);
+
+        final address = _stringProperty(deviceProperties['Address'])?.toUpperCase();
+        final peerNodeId = _nodeIdFromServiceData(deviceProperties['ServiceData']) ??
+            (address == null ? null : _livePeerNodeIdByAddress[address]);
         if (peerNodeId == null || peerNodeId == _localNodeId) continue;
 
         final devicePath = entry.key.value;
@@ -210,8 +322,13 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
           ),
         );
         session.peerNodeId = peerNodeId;
+        session.address = address;
 
         final connected = _boolProperty(deviceProperties['Connected']);
+        final servicesResolved = _boolProperty(deviceProperties['ServicesResolved']);
+        session.connected = connected;
+        session.servicesResolved = servicesResolved;
+
         if (!connected) {
           // Any cached GATT object belongs to the previous connection and must
           // not prevent service re-binding after a reconnect.
@@ -221,6 +338,8 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
           if (!session.connecting) {
             await _connectPeer(session);
           }
+        } else if (!servicesResolved && session.characteristic == null) {
+          _status('peerConnectedResolvingServices');
         }
       }
 
@@ -237,6 +356,8 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
         });
         if (characteristicEntry.isNotEmpty) {
           await _bindCharacteristic(session, characteristicEntry.first.key);
+        } else if (session.connected && session.servicesResolved) {
+          _status('peerCharacteristicMissing');
         }
       }
     } on DBusMethodResponseException {
@@ -250,6 +371,7 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
     final client = _client;
     if (client == null) return;
     peer.connecting = true;
+    _status('peerConnecting');
     final device = DBusRemoteObject(
       client,
       name: _bluezName,
@@ -283,6 +405,7 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       name: _bluezName,
       path: characteristicPath,
     );
+    _status('peerSubscribing');
     try {
       await characteristic.callMethod(
         _characteristicInterface,
@@ -328,6 +451,31 @@ class LinuxBluezSessionPlatformAdapter implements BleSessionPlatformAdapter {
       }
     }
     peer.characteristic = null;
+  }
+
+  void _emitConnectionDiagnostic() {
+    if (!_running) return;
+    if (_peers.values.any((peer) => peer.characteristic != null)) {
+      _status('peerSubscribed');
+      return;
+    }
+    if (_livePeerNodeIdByAddress.isEmpty) {
+      _status('scanningForGattPeer');
+      return;
+    }
+    if (_peers.isEmpty) {
+      _status('peerAdvertisementMatchedAwaitingBluezDevice');
+      return;
+    }
+    if (_peers.values.any((peer) => peer.connected && !peer.servicesResolved)) {
+      _status('peerConnectedResolvingServices');
+      return;
+    }
+    if (_peers.values.any((peer) => peer.connected && peer.servicesResolved)) {
+      _status('peerCharacteristicMissing');
+      return;
+    }
+    _status('peerConnectPending');
   }
 
   void _status(String status) => _onStatus?.call(status);
@@ -385,10 +533,13 @@ class _BluezPeerSession {
 
   final DBusObjectPath devicePath;
   String peerNodeId;
+  String? address;
   DBusRemoteObject? device;
   DBusRemoteObject? characteristic;
   StreamSubscription<DBusPropertiesChangedSignal>? notificationSubscription;
   bool connecting = false;
+  bool connected = false;
+  bool servicesResolved = false;
 }
 
 extension _FirstOrNull<T> on Iterable<T> {
