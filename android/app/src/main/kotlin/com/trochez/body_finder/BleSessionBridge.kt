@@ -11,10 +11,13 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.os.Build
-import android.os.ParcelUuid
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
+import android.os.ParcelUuid
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -23,9 +26,10 @@ import java.util.UUID
 /**
  * BLE GATT endpoint for Body Finder session/control traffic.
  *
- * This bridge only transports already-encoded Body Finder session chunks. It
- * does not create range or anomaly measurements. Physical BLE RSSI ranging is
- * intentionally kept in [BleRangingBridge].
+ * This bridge owns the connectable Body Finder advertisement and transports
+ * already-encoded session chunks. It does not create range or anomaly
+ * measurements. Physical BLE RSSI ranging is intentionally kept in
+ * [BleRangingBridge], which only scans this advertisement.
  */
 class BleSessionBridge(
     private val activity: Activity,
@@ -35,6 +39,7 @@ class BleSessionBridge(
         private const val CHANNEL = "body_finder/ble_session"
         private const val REQUEST_CODE = 6143
         private val SERVICE_UUID = UUID.fromString("93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31")
+        private val SERVICE_PARCEL_UUID = ParcelUuid(SERVICE_UUID)
         private val SESSION_CHARACTERISTIC_UUID =
             UUID.fromString("93f3b61f-5e3c-4a73-9d10-8fbc5cf4de31")
         private val CLIENT_CONFIGURATION_UUID =
@@ -51,6 +56,7 @@ class BleSessionBridge(
     private var pendingNodeId: String? = null
     private val connectedDevices = linkedSetOf<BluetoothDevice>()
     private val subscribedDevices = linkedSetOf<BluetoothDevice>()
+    private var advertising = false
     private var running = false
 
     init {
@@ -132,6 +138,10 @@ class BleSessionBridge(
         if (!adapter.isEnabled) {
             return mapOf("status" to "bluetoothOff", "reason" to "Bluetooth is disabled")
         }
+        val advertiser = adapter.bluetoothLeAdvertiser
+            ?: return mapOf("status" to "unavailable", "reason" to "BLE advertising unavailable")
+        val nodeBytes = hexNodeIdToBytes(nodeId)
+            ?: return mapOf("status" to "invalidNodeId", "reason" to "nodeId must contain 16 hex characters")
 
         return try {
             val server = bluetoothManager.openGattServer(activity, callback)
@@ -159,15 +169,29 @@ class BleSessionBridge(
             running = server.addService(service)
             if (!running) {
                 stop()
-                mapOf("status" to "failed", "reason" to "Could not register GATT service")
-            } else {
-                mapOf(
-                    "status" to "started",
-                    "nodeId" to nodeId.lowercase(),
-                    "serviceUuid" to SERVICE_UUID.toString(),
-                    "characteristicUuid" to SESSION_CHARACTERISTIC_UUID.toString(),
-                )
+                return mapOf("status" to "failed", "reason" to "Could not register GATT service")
             }
+
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .setConnectable(true)
+                .setTimeout(0)
+                .build()
+            val data = AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .setIncludeTxPowerLevel(false)
+                .addServiceData(SERVICE_PARCEL_UUID, nodeBytes)
+                .build()
+            advertiser.startAdvertising(settings, data, advertiseCallback)
+            advertising = true
+
+            mapOf(
+                "status" to "started",
+                "nodeId" to nodeId.lowercase(),
+                "serviceUuid" to SERVICE_UUID.toString(),
+                "characteristicUuid" to SESSION_CHARACTERISTIC_UUID.toString(),
+            )
         } catch (error: SecurityException) {
             stop()
             mapOf("status" to "permissionDenied", "reason" to (error.message ?: "Bluetooth permission denied"))
@@ -192,14 +216,21 @@ class BleSessionBridge(
                     server.notifyCharacteristicChanged(device, characteristic, false)
                 }
             } catch (_: SecurityException) {
-                // A permission or connection transition is reported through status/connection callbacks.
             } catch (_: IllegalArgumentException) {
-                // Ignore a peer that disconnected while the notification was queued.
             }
         }
     }
 
     fun stop() {
+        val adapter = bluetoothManager.adapter
+        if (advertising) {
+            try {
+                adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+            } catch (_: SecurityException) {
+            }
+        }
+        advertising = false
+
         val server = gattServer
         gattServer = null
         sessionCharacteristic = null
@@ -219,6 +250,18 @@ class BleSessionBridge(
         pendingResult = null
         pendingNodeId = null
         channel.setMethodCallHandler(null)
+    }
+
+    private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartFailure(errorCode: Int) {
+            advertising = false
+            activity.runOnUiThread {
+                channel.invokeMethod(
+                    "status",
+                    mapOf("status" to "advertiseFailed", "errorCode" to errorCode),
+                )
+            }
+        }
     }
 
     private val callback = object : BluetoothGattServerCallback() {
@@ -319,6 +362,17 @@ class BleSessionBridge(
 
     private fun requiredPermissions(): List<String> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return emptyList()
-        return listOf(Manifest.permission.BLUETOOTH_CONNECT)
+        return listOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+        )
+    }
+
+    private fun hexNodeIdToBytes(nodeId: String): ByteArray? {
+        val value = nodeId.lowercase().take(16)
+        if (!value.matches(Regex("[0-9a-f]{16}"))) return null
+        return ByteArray(8) { index ->
+            value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
     }
 }
