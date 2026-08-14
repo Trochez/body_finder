@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import '../../application/geometry/bootstrap_layout_solver.dart';
 import '../../application/geometry/relative_position_solver.dart';
 import '../../application/session/coordinator_election.dart';
 import '../../application/session/peer_registry.dart';
@@ -20,12 +21,23 @@ class PeerDiscoverySnapshot {
   final String localNodeId;
   final List<PeerRecord> peers;
   final String? coordinatorId;
+
+  /// Nodes that still lack a defensible metric position.
   final Set<String> unresolvedNodeIds;
   final int rangeObservationCount;
 
   int get nodeCount => peers.length;
-  int get positionedNodeCount => peers.where((peer) => peer.position != null).length;
+
+  /// Metric, range-derived positions only. Kept separate from the bootstrap
+  /// topology layout so physical algorithms never consume synthetic meters.
+  int get positionedNodeCount =>
+      peers.where((peer) => peer.hasMetricPosition).length;
+
+  int get bootstrapPositionedNodeCount =>
+      peers.where((peer) => peer.hasBootstrapPosition).length;
+
   bool get has2DFrame => positionedNodeCount >= 3;
+  bool get hasBootstrap2DLayout => bootstrapPositionedNodeCount >= 3;
 }
 
 typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
@@ -50,6 +62,7 @@ class LanPeerDiscovery {
   final String platform;
   final PeerRegistry _registry = PeerRegistry();
   final RelativePositionSolver _positionSolver = const RelativePositionSolver();
+  final BootstrapLayoutSolver _bootstrapLayoutSolver = const BootstrapLayoutSolver();
   final Map<String, RangeObservation> _localRanges = {};
   final Map<String, _ReceivedRange> _ranges = {};
 
@@ -62,16 +75,19 @@ class LanPeerDiscovery {
 
   PeerDiscoverySnapshot get snapshot {
     final activeIds = _registry.peers.map((peer) => peer.id).toSet();
-    final solution = _positionSolver.solve(
+    final metricSolution = _positionSolver.solve(
       activeNodeIds: activeIds,
       observations: _ranges.values.map((stored) => stored.observation),
     );
+    final bootstrapSolution = _bootstrapLayoutSolver.solve(activeIds);
+
     final peers = _registry.peers
         .map((peer) {
-          final estimate = solution.positions[peer.id];
+          final estimate = metricSolution.positions[peer.id];
           return peer.withEstimatedPosition(
             estimate?.position,
             estimate?.sigmaMeters,
+            bootstrapPosition: bootstrapSolution.positions[peer.id],
           );
         })
         .toList()
@@ -81,8 +97,8 @@ class LanPeerDiscovery {
       localNodeId: nodeId,
       peers: peers,
       coordinatorId: electCoordinator(_registry.peers),
-      unresolvedNodeIds: solution.unresolvedNodeIds,
-      rangeObservationCount: solution.observationCount,
+      unresolvedNodeIds: metricSolution.unresolvedNodeIds,
+      rangeObservationCount: metricSolution.observationCount,
     );
   }
 
