@@ -25,13 +25,14 @@ class PeerRegistry {
     int nowMicros, {
     String? platform,
     Vec2? position,
+    bool positionProvided = false,
   }) {
     final previous = _peers[id];
     _peers[id] = PeerRecord(
       id: id,
       lastSeenMicros: nowMicros,
       platform: platform ?? previous?.platform ?? 'unknown',
-      position: position ?? previous?.position,
+      position: positionProvided ? position : previous?.position,
     );
   }
 
