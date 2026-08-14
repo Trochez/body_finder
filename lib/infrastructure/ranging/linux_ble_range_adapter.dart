@@ -206,8 +206,9 @@ class LinuxBleRangeAdapter {
     final direct = RegExp(r'\b([0-9a-f]{16})\b').firstMatch(tail);
     if (direct != null) return direct.group(1);
 
-    final bytes = RegExp(r'(?:0x)?\b([0-9a-f]{2})\b')
-        .allMatches(tail)
+    final byteTail = tail.replaceAll('0x', ' ');
+    final bytes = RegExp(r'\b([0-9a-f]{2})\b')
+        .allMatches(byteTail)
         .map((match) => match.group(1)!)
         .take(8)
         .toList(growable: false);
