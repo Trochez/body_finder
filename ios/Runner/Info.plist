@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Body Finder checks Bluetooth availability for controlled research sessions with nearby participating devices.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Body Finder uses the local network to discover other phones participating in the same research session.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
