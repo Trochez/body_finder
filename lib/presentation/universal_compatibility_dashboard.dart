@@ -7,6 +7,7 @@ import '../application/orchestration/portability_policy.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
+import '../infrastructure/network/session_transport_factory.dart';
 import '../infrastructure/ranging/ble_range_adapter.dart';
 import 'capability_dashboard.dart';
 import 'node_geometry_panel.dart';
@@ -49,9 +50,18 @@ class _UniversalCompatibilityDashboardState
     super.initState();
     _manager = widget.manager ?? SensorCapabilityManager();
     _scan = _manager.scan();
+    final nodeId = widget.nodeId;
     _discovery = LanPeerDiscovery(
       onChanged: _onPeersChanged,
-      nodeId: widget.nodeId,
+      nodeId: nodeId,
+      transports: nodeId == null
+          ? null
+          : [
+              createDefaultSessionTransport(
+                nodeId: nodeId,
+                lanPort: LanPeerDiscovery.port,
+              ),
+            ],
     );
     _bleRanging = BleRangeAdapter();
   }
@@ -237,7 +247,7 @@ class _UniversalCompatibilityDashboardState
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Session/control transport and physical sensing are separate. In this build LAN/UDP can carry session messages, but Wi-Fi LAN and Ethernet contribute zero physical sensing evidence. Offline BLE session transport is being integrated on the same transport-independent session engine.',
+                  'Session/control transport and physical sensing are separate. Body Finder can combine BLE control and LAN/UDP paths when available; Wi-Fi LAN and Ethernet still contribute zero physical sensing evidence.',
                 ),
                 const SizedBox(height: 12),
                 Card(
