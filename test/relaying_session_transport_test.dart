@@ -52,6 +52,13 @@ void main() {
       ubuntuTransport.activeChildTransportIds,
       containsAll(<String>{'bleControl', 'lanUdp'}),
     );
+    expect(ubuntuTransport.pathStatuses['bleControl'], 'started');
+    expect(ubuntuTransport.pathStatuses['lanUdp'], 'started');
+    expect(ubuntu.relayedMessageCount, greaterThan(0));
+    expect(
+      ubuntu.transportPathStatuses,
+      containsPair('bleControl', 'started'),
+    );
 
     await android.stop();
     await ubuntu.stop();
