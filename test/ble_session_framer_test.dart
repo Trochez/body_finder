@@ -12,7 +12,7 @@ void main() {
     );
 
     final chunks = framer.fragment(message);
-    expect(chunks, hasLength(greaterThan(1)));
+    expect(chunks.length, greaterThan(1));
     expect(chunks.every((chunk) => chunk.length <= 20), isTrue);
 
     Uint8List? completed;
