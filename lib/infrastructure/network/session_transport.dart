@@ -22,3 +22,12 @@ abstract interface class SessionTransport {
 
   Future<void> stop();
 }
+
+/// Optional diagnostics contract for transports that multiplex or relay across
+/// multiple physical communication paths.
+///
+/// Path identifiers describe communication only; they never imply sensing
+/// capability or physical ranging evidence.
+abstract interface class SessionTransportDiagnostics {
+  Set<String> get activePathIds;
+}

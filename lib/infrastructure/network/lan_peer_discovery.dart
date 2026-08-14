@@ -50,7 +50,7 @@ typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
 /// The historical class name is retained for source compatibility, but the
 /// implementation is no longer coupled to LAN/UDP. Session messages can be
 /// carried by any [SessionTransport]. LAN is only the default opportunistic
-/// fast path until the BLE control transport is enabled.
+/// fast path.
 class LanPeerDiscovery {
   LanPeerDiscovery({
     PeerDiscoveryListener? onChanged,
@@ -83,10 +83,17 @@ class LanPeerDiscovery {
 
   bool get isRunning => _transports.any((transport) => transport.isRunning);
 
-  Set<String> get activeTransportIds => _transports
-      .where((transport) => transport.isRunning)
-      .map((transport) => transport.id)
-      .toSet();
+  Set<String> get activeTransportIds {
+    final ids = <String>{};
+    for (final transport in _transports.where((value) => value.isRunning)) {
+      if (transport case SessionTransportDiagnostics diagnostics) {
+        ids.addAll(diagnostics.activePathIds);
+      } else {
+        ids.add(transport.id);
+      }
+    }
+    return ids;
+  }
 
   PeerDiscoverySnapshot get snapshot {
     final activeIds = _registry.peers.map((peer) => peer.id).toSet();

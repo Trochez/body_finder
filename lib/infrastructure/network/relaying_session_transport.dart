@@ -10,7 +10,8 @@ import 'session_transport.dart';
 /// never implies that its medium contributes physical sensing evidence.
 /// Ethernet/LAN, for example, may carry a relayed BLE measurement while still
 /// having zero sensing weight itself.
-class RelayingSessionTransport implements SessionTransport {
+class RelayingSessionTransport
+    implements SessionTransport, SessionTransportDiagnostics {
   RelayingSessionTransport(
     Iterable<SessionTransport> transports, {
     this.recentMessageTtl = const Duration(seconds: 15),
@@ -39,10 +40,20 @@ class RelayingSessionTransport implements SessionTransport {
   @override
   bool get isRunning => _transports.any((transport) => transport.isRunning);
 
-  Set<String> get activeChildTransportIds => _transports
-      .where((transport) => transport.isRunning)
-      .map((transport) => transport.id)
-      .toSet();
+  Set<String> get activeChildTransportIds => activePathIds;
+
+  @override
+  Set<String> get activePathIds {
+    final result = <String>{};
+    for (final transport in _transports.where((value) => value.isRunning)) {
+      if (transport case SessionTransportDiagnostics diagnostics) {
+        result.addAll(diagnostics.activePathIds);
+      } else {
+        result.add(transport.id);
+      }
+    }
+    return result;
+  }
 
   int get relayedMessageCount => _relayedMessageCount;
   int get duplicateMessageCount => _duplicateMessageCount;
