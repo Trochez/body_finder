@@ -20,6 +20,7 @@ class SessionValidationReport {
   const SessionValidationReport({
     required this.observedNodeIds,
     required this.observedTransportIds,
+    required this.transportStatuses,
     required this.maxNodeCount,
     required this.maxMetricNodeCount,
     required this.maxRangeEdgeCount,
@@ -35,6 +36,7 @@ class SessionValidationReport {
 
   final Set<String> observedNodeIds;
   final Set<String> observedTransportIds;
+  final Map<String, String> transportStatuses;
   final int maxNodeCount;
   final int maxMetricNodeCount;
   final int maxRangeEdgeCount;
@@ -51,12 +53,18 @@ class SessionValidationReport {
     String value(double? number, String unit) => number == null
         ? 'not observed'
         : '${number.toStringAsFixed(2)} $unit';
+    final statusText = transportStatuses.isEmpty
+        ? 'none'
+        : transportStatuses.entries
+            .map((entry) => '${entry.key}=${entry.value}')
+            .join(', ');
 
     return <String>[
       'BODY FINDER VALIDATION OBSERVATIONS',
       'Nodes observed: ${observedNodeIds.length}',
       'Maximum simultaneous nodes: $maxNodeCount',
       'Transports observed: ${observedTransportIds.isEmpty ? 'none' : observedTransportIds.join(', ')}',
+      'Transport status: $statusText',
       'Maximum physical range edges: $maxRangeEdgeCount',
       'Maximum metric nodes: $maxMetricNodeCount',
       'Physical range samples: $rangeSampleCount',
@@ -79,6 +87,7 @@ class SessionValidationReport {
 class SessionValidationRecorder {
   final Set<String> _observedNodeIds = <String>{};
   final Set<String> _observedTransportIds = <String>{};
+  final Map<String, String> _transportStatuses = <String, String>{};
   final Map<String, PhysicalRangeTelemetry> _latestRangesByPeer =
       <String, PhysicalRangeTelemetry>{};
 
@@ -113,6 +122,20 @@ class SessionValidationRecorder {
     _observedTransportIds.addAll(
       transportIds.where((id) => id.isNotEmpty),
     );
+  }
+
+  void recordTransportDiagnostics({
+    required Map<String, String> pathStatuses,
+    required int relayedMessageCount,
+    required int duplicateMessageCount,
+  }) {
+    _transportStatuses.addAll(pathStatuses);
+    if (relayedMessageCount > _relayedMessageCount) {
+      _relayedMessageCount = relayedMessageCount;
+    }
+    if (duplicateMessageCount > _duplicateMessageCount) {
+      _duplicateMessageCount = duplicateMessageCount;
+    }
   }
 
   void recordPhysicalRange({
@@ -165,18 +188,19 @@ class SessionValidationRecorder {
     required int relayedMessageCount,
     required int duplicateMessageCount,
   }) {
-    if (relayedMessageCount > _relayedMessageCount) {
-      _relayedMessageCount = relayedMessageCount;
-    }
-    if (duplicateMessageCount > _duplicateMessageCount) {
-      _duplicateMessageCount = duplicateMessageCount;
-    }
+    recordTransportDiagnostics(
+      pathStatuses: const <String, String>{},
+      relayedMessageCount: relayedMessageCount,
+      duplicateMessageCount: duplicateMessageCount,
+    );
   }
 
   SessionValidationReport get report => SessionValidationReport(
         observedNodeIds: Set<String>.unmodifiable(_observedNodeIds),
         observedTransportIds:
             Set<String>.unmodifiable(_observedTransportIds),
+        transportStatuses:
+            Map<String, String>.unmodifiable(_transportStatuses),
         maxNodeCount: _maxNodeCount,
         maxMetricNodeCount: _maxMetricNodeCount,
         maxRangeEdgeCount: _maxRangeEdgeCount,
@@ -195,6 +219,7 @@ class SessionValidationRecorder {
   void reset() {
     _observedNodeIds.clear();
     _observedTransportIds.clear();
+    _transportStatuses.clear();
     _latestRangesByPeer.clear();
     _maxNodeCount = 0;
     _maxMetricNodeCount = 0;
