@@ -7,7 +7,7 @@ import '../application/session/peer_registry.dart';
 import '../domain/geometry/vec2.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
 
-class NodeGeometryPanel extends StatefulWidget {
+class NodeGeometryPanel extends StatelessWidget {
   const NodeGeometryPanel({
     super.key,
     required this.discovery,
@@ -18,47 +18,11 @@ class NodeGeometryPanel extends StatefulWidget {
   final PeerDiscoverySnapshot snapshot;
 
   @override
-  State<NodeGeometryPanel> createState() => _NodeGeometryPanelState();
-}
-
-class _NodeGeometryPanelState extends State<NodeGeometryPanel> {
-  final _xController = TextEditingController();
-  final _yController = TextEditingController();
-  String? _inputError;
-
-  @override
-  void dispose() {
-    _xController.dispose();
-    _yController.dispose();
-    super.dispose();
-  }
-
-  void _applyPosition() {
-    final x = double.tryParse(_xController.text.trim().replaceAll(',', '.'));
-    final y = double.tryParse(_yController.text.trim().replaceAll(',', '.'));
-    if (x == null || y == null || !x.isFinite || !y.isFinite) {
-      setState(() => _inputError = 'Enter valid X and Y values in meters.');
-      return;
-    }
-    widget.discovery.updateLocalPosition(Vec2(x, y));
-    setState(() => _inputError = null);
-  }
-
-  void _clearPosition() {
-    widget.discovery.updateLocalPosition(null);
-    _xController.clear();
-    _yController.clear();
-    setState(() => _inputError = null);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final positioned = widget.snapshot.peers
+    final positioned = snapshot.peers
         .where((peer) => peer.position != null)
         .toList(growable: false);
-    final local = widget.snapshot.peers
-        .where((peer) => peer.id == widget.snapshot.localNodeId)
-        .firstOrNull;
+    final unresolved = snapshot.unresolvedNodeIds.length;
 
     return Card(
       child: Padding(
@@ -66,69 +30,37 @@ class _NodeGeometryPanelState extends State<NodeGeometryPanel> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Shared XY geometry', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              'Automatic relative positioning',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 6),
             const Text(
-              'For this validation step, enter the measured position of this device in meters. Each node broadcasts only its own coordinate.',
+              'No manual XY entry is required. Body Finder derives a shared meter-scale frame only from real range observations exposed by participating devices.',
             ),
             const SizedBox(height: 12),
-            Row(
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _xController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                    decoration: const InputDecoration(
-                      labelText: 'My X (m)',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: _yController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                    decoration: const InputDecoration(
-                      labelText: 'My Y (m)',
-                      border: OutlineInputBorder(),
-                    ),
+                Chip(label: Text('${snapshot.rangeObservationCount} range edges')),
+                Chip(label: Text('${positioned.length}/${snapshot.nodeCount} positioned')),
+                Chip(
+                  label: Text(
+                    snapshot.has2DFrame ? '2D FRAME READY' : '$unresolved UNRESOLVED',
                   ),
                 ),
               ],
             ),
-            if (_inputError != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _inputError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+            const SizedBox(height: 12),
+            if (snapshot.has2DFrame)
+              const Text(
+                'The coordinate frame is relative: origin and rotation are selected deterministically from the active range graph. Accuracy depends on the ranging sources and geometry.',
+              )
+            else
+              const Text(
+                'Waiting for enough independent distance observations. LAN heartbeat timing is not converted into physical distance. UWB, Wi-Fi RTT, BLE RSSI, or a compatible external ranging source must provide the required edges.',
               ),
-            ],
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _applyPosition,
-                    icon: const Icon(Icons.place),
-                    label: const Text('Broadcast my position'),
-                  ),
-                ),
-                if (local?.position != null) ...[
-                  const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: 'Clear my position',
-                    onPressed: _clearPosition,
-                    icon: const Icon(Icons.clear),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              '${positioned.length} of ${widget.snapshot.nodeCount} nodes positioned'
-              '${positioned.length >= 3 ? ' · 2D perimeter ready' : ' · need ${math.max(0, 3 - positioned.length)} more for a 2D perimeter'}',
-            ),
             const SizedBox(height: 12),
             if (positioned.isNotEmpty)
               SizedBox(
@@ -137,20 +69,19 @@ class _NodeGeometryPanelState extends State<NodeGeometryPanel> {
                 child: CustomPaint(
                   painter: _GeometryPainter(
                     peers: positioned,
-                    localNodeId: widget.snapshot.localNodeId,
-                    coordinatorId: widget.snapshot.coordinatorId,
+                    localNodeId: snapshot.localNodeId,
+                    coordinatorId: snapshot.coordinatorId,
                   ),
                 ),
               )
             else
-              const Text('No node has published an XY position yet.'),
+              const Text('No defensible metric position is available yet.'),
             const SizedBox(height: 8),
-            ...widget.snapshot.peers.map(
+            ...snapshot.peers.map(
               (peer) => Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
-                  '${_shortId(peer.id)} · ${peer.platform} · '
-                  '${peer.position == null ? 'position pending' : '(${peer.position!.x.toStringAsFixed(2)}, ${peer.position!.y.toStringAsFixed(2)}) m'}',
+                  '${_shortId(peer.id)} · ${peer.platform} · ${_positionText(peer)}',
                 ),
               ),
             ),
@@ -158,6 +89,16 @@ class _NodeGeometryPanelState extends State<NodeGeometryPanel> {
         ),
       ),
     );
+  }
+
+  static String _positionText(PeerRecord peer) {
+    final position = peer.position;
+    if (position == null) return 'position unresolved';
+    final sigma = peer.positionSigmaMeters;
+    final uncertainty = sigma == null || !sigma.isFinite
+        ? 'uncertainty pending'
+        : '±${sigma.toStringAsFixed(2)} m';
+    return '(${position.x.toStringAsFixed(2)}, ${position.y.toStringAsFixed(2)}) m · $uncertainty';
   }
 
   static String _shortId(String value) =>
@@ -225,7 +166,8 @@ class _GeometryPainter extends CustomPainter {
     if (points.length >= 3) {
       final boundary = convexBoundary(points).vertices;
       if (boundary.length >= 3) {
-        final path = Path()..moveTo(project(boundary.first).dx, project(boundary.first).dy);
+        final first = project(boundary.first);
+        final path = Path()..moveTo(first.dx, first.dy);
         for (final vertex in boundary.skip(1)) {
           final p = project(vertex);
           path.lineTo(p.dx, p.dy);
@@ -251,6 +193,18 @@ class _GeometryPainter extends CustomPainter {
       final p = project(peer.position!);
       final isLocal = peer.id == localNodeId;
       final isCoordinator = peer.id == coordinatorId;
+      final sigma = peer.positionSigmaMeters;
+      if (sigma != null && sigma.isFinite && sigma > 0) {
+        final scaleX = drawableWidth / math.max(0.01, maxX - minX);
+        final radius = math.min(45.0, math.max(4.0, sigma * scaleX));
+        canvas.drawCircle(
+          p,
+          radius,
+          Paint()
+            ..color = Colors.teal.withValues(alpha: 0.08)
+            ..style = PaintingStyle.fill,
+        );
+      }
       canvas.drawCircle(
         p,
         isLocal ? 9 : 7,
@@ -276,8 +230,4 @@ class _GeometryPainter extends CustomPainter {
       oldDelegate.peers != peers ||
       oldDelegate.localNodeId != localNodeId ||
       oldDelegate.coordinatorId != coordinatorId;
-}
-
-extension _FirstOrNull<T> on Iterable<T> {
-  T? get firstOrNull => isEmpty ? null : first;
 }

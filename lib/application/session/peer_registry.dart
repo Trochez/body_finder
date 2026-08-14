@@ -6,12 +6,22 @@ class PeerRecord {
     required this.lastSeenMicros,
     this.platform = 'unknown',
     this.position,
+    this.positionSigmaMeters,
   });
 
   final String id;
   final int lastSeenMicros;
   final String platform;
   final Vec2? position;
+  final double? positionSigmaMeters;
+
+  PeerRecord withEstimatedPosition(Vec2? value, double? sigmaMeters) => PeerRecord(
+        id: id,
+        lastSeenMicros: lastSeenMicros,
+        platform: platform,
+        position: value,
+        positionSigmaMeters: sigmaMeters,
+      );
 }
 
 class PeerRegistry {
@@ -24,15 +34,12 @@ class PeerRegistry {
     String id,
     int nowMicros, {
     String? platform,
-    Vec2? position,
-    bool positionProvided = false,
   }) {
     final previous = _peers[id];
     _peers[id] = PeerRecord(
       id: id,
       lastSeenMicros: nowMicros,
       platform: platform ?? previous?.platform ?? 'unknown',
-      position: positionProvided ? position : previous?.position,
     );
   }
 

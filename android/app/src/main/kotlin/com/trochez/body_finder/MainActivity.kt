@@ -11,6 +11,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private var bleRangingBridge: BleRangingBridge? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "body_finder/capabilities")
@@ -18,6 +20,25 @@ class MainActivity : FlutterActivity() {
                 if (call.method == "scanCapabilities") result.success(scanCapabilities())
                 else result.notImplemented()
             }
+        bleRangingBridge?.dispose()
+        bleRangingBridge = BleRangingBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (bleRangingBridge?.onRequestPermissionsResult(requestCode, permissions, grantResults) == true) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun onDestroy() {
+        bleRangingBridge?.dispose()
+        bleRangingBridge = null
+        super.onDestroy()
     }
 
     private fun scanCapabilities(): Map<String, Any> {
