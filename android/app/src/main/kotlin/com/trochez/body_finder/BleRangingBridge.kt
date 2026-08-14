@@ -177,8 +177,11 @@ class BleRangingBridge(
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val data = result.scanRecord?.getServiceData(SERVICE_UUID) ?: return
-            if (data.size != 8) return
-            val peerNodeId = data.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            // The first eight bytes are the persistent node ID. Newer Body
+            // Finder advertisements may append freshness bytes so BlueZ does
+            // not reuse stale ServiceData after a session restart.
+            if (data.size < 8) return
+            val peerNodeId = data.take(8).joinToString("") { "%02x".format(it.toInt() and 0xff) }
             if (peerNodeId == localNodeId) return
 
             val previous = smoothedRssi[peerNodeId]

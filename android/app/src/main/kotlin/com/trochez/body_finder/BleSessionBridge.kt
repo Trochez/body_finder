@@ -22,6 +22,7 @@ import android.os.ParcelUuid
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.security.SecureRandom
 import java.util.ArrayDeque
 import java.util.UUID
 
@@ -56,6 +57,7 @@ class BleSessionBridge(
     private val channel = MethodChannel(messenger, CHANNEL)
     private val bluetoothManager =
         activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val secureRandom = SecureRandom()
 
     private var gattServer: BluetoothGattServer? = null
     private var sessionCharacteristic: BluetoothGattCharacteristic? = null
@@ -66,6 +68,8 @@ class BleSessionBridge(
     private val notificationQueue = ArrayDeque<PendingNotification>()
     private var notificationInFlight = false
     private var advertising = false
+    private var advertisingReady = false
+    private var gattServiceReady = false
     private var running = false
 
     init {
@@ -187,10 +191,20 @@ class BleSessionBridge(
                 .setConnectable(true)
                 .setTimeout(0)
                 .build()
+
+            // The persistent 8-byte node ID remains the first bytes. A ninth
+            // per-session freshness byte forces BlueZ to observe a changed
+            // ServiceData value after app/session restarts instead of reusing a
+            // stale cached node-ID payload. It is diagnostic freshness only,
+            // not an identity or security primitive.
+            val serviceData = ByteArray(nodeBytes.size + 1)
+            nodeBytes.copyInto(serviceData)
+            serviceData[nodeBytes.size] = secureRandom.nextInt(256).toByte()
+
             val data = AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
                 .setIncludeTxPowerLevel(false)
-                .addServiceData(SERVICE_PARCEL_UUID, nodeBytes)
+                .addServiceData(SERVICE_PARCEL_UUID, serviceData)
                 .build()
             advertiser.startAdvertising(settings, data, advertiseCallback)
             advertising = true
@@ -268,6 +282,8 @@ class BleSessionBridge(
             }
         }
         advertising = false
+        advertisingReady = false
+        gattServiceReady = false
 
         notificationQueue.clear()
         notificationInFlight = false
@@ -293,8 +309,14 @@ class BleSessionBridge(
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            advertisingReady = true
+            emitEndpointReadiness()
+        }
+
         override fun onStartFailure(errorCode: Int) {
             advertising = false
+            advertisingReady = false
             activity.runOnUiThread {
                 channel.invokeMethod(
                     "status",
@@ -304,17 +326,41 @@ class BleSessionBridge(
         }
     }
 
+    private fun emitEndpointReadiness() {
+        val status = when {
+            gattServiceReady && advertisingReady -> "readyForPeer"
+            gattServiceReady -> "gattReady"
+            advertisingReady -> "advertisingReady"
+            else -> return
+        }
+        activity.runOnUiThread {
+            channel.invokeMethod(
+                "status",
+                mapOf(
+                    "status" to status,
+                    "gattReady" to gattServiceReady,
+                    "advertisingReady" to advertisingReady,
+                ),
+            )
+        }
+    }
+
     private val callback = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             if (service.uuid != SERVICE_UUID) return
-            activity.runOnUiThread {
-                channel.invokeMethod(
-                    "status",
-                    mapOf(
-                        "status" to if (status == BluetoothGatt.GATT_SUCCESS) "gattReady" else "serviceAddFailed",
-                        "gattStatus" to status,
-                    ),
-                )
+            gattServiceReady = status == BluetoothGatt.GATT_SUCCESS
+            if (gattServiceReady) {
+                emitEndpointReadiness()
+            } else {
+                activity.runOnUiThread {
+                    channel.invokeMethod(
+                        "status",
+                        mapOf(
+                            "status" to "serviceAddFailed",
+                            "gattStatus" to status,
+                        ),
+                    )
+                }
             }
         }
 
@@ -339,6 +385,7 @@ class BleSessionBridge(
                         "status" to if (newState == BluetoothProfile.STATE_CONNECTED) "peerConnected" else "peerDisconnected",
                         "sourceKey" to device.address,
                         "connectedPeers" to connectedDevices.size,
+                        "gattStatus" to status,
                     ),
                 )
             }
