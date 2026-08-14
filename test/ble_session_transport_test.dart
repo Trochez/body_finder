@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:body_finder/infrastructure/network/ble_session_transport.dart';
@@ -72,6 +73,39 @@ void main() {
     expect(received[1], orderedEquals(second));
     await transport.stop();
   });
+
+  test('binds transport source to persistent node id from complete session payload', () async {
+    final platform = _IdentityBindingFakeBleSessionPlatformAdapter();
+    final transport = BleSessionTransport(
+      nodeId: 'aaaaaaaaaaaaaaaa',
+      platformAdapter: platform,
+    );
+    final received = <Uint8List>[];
+    await transport.start(onMessage: received.add);
+
+    final payload = Uint8List.fromList(
+      utf8.encode(
+        jsonEncode(<String, Object>{
+          'protocol': 'body_finder_peer_v1',
+          'nodeId': '8f4f4825aabbccdd',
+          'platform': 'android',
+          'timestampMicros': 1,
+          'ranges': const <Object>[],
+        }),
+      ),
+    );
+    await transport.broadcast(payload);
+    final chunks = platform.sentChunks.toList(growable: false);
+    platform.sentChunks.clear();
+    for (final chunk in chunks) {
+      platform.emit('4F:A2:A5:D3:53:9C', chunk);
+    }
+
+    expect(received, hasLength(1));
+    expect(platform.boundSourceKey, '4F:A2:A5:D3:53:9C');
+    expect(platform.boundNodeId, '8f4f4825aabbccdd');
+    await transport.stop();
+  });
 }
 
 class _FakeBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
@@ -115,5 +149,18 @@ class _FakeBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
         bytes: Uint8List.fromList(chunk),
       ),
     );
+  }
+}
+
+class _IdentityBindingFakeBleSessionPlatformAdapter
+    extends _FakeBleSessionPlatformAdapter
+    implements BleSessionPeerIdentityBinder {
+  String? boundSourceKey;
+  String? boundNodeId;
+
+  @override
+  void bindPeerIdentity({required String sourceKey, required String nodeId}) {
+    boundSourceKey = sourceKey;
+    boundNodeId = nodeId;
   }
 }
