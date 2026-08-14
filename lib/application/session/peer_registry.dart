@@ -7,20 +7,36 @@ class PeerRecord {
     this.platform = 'unknown',
     this.position,
     this.positionSigmaMeters,
+    this.bootstrapPosition,
   });
 
   final String id;
   final int lastSeenMicros;
   final String platform;
+
+  /// Defensible physical position derived from real range observations.
   final Vec2? position;
   final double? positionSigmaMeters;
 
-  PeerRecord withEstimatedPosition(Vec2? value, double? sigmaMeters) => PeerRecord(
+  /// Device-agnostic shared topology position. This is normalized and NON-METRIC.
+  /// It must never be consumed by body-localization or physical-distance logic.
+  final Vec2? bootstrapPosition;
+
+  bool get hasMetricPosition => position != null;
+  bool get hasBootstrapPosition => bootstrapPosition != null;
+
+  PeerRecord withEstimatedPosition(
+    Vec2? value,
+    double? sigmaMeters, {
+    Vec2? bootstrapPosition,
+  }) =>
+      PeerRecord(
         id: id,
         lastSeenMicros: lastSeenMicros,
         platform: platform,
         position: value,
         positionSigmaMeters: sigmaMeters,
+        bootstrapPosition: bootstrapPosition,
       );
 }
 
