@@ -13,6 +13,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var bleRangingBridge: BleRangingBridge? = null
     private var bleSessionBridge: BleSessionBridge? = null
+    private var blePeerClientBridge: AndroidBlePeerClientBridge? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -23,8 +24,10 @@ class MainActivity : FlutterActivity() {
             }
         bleRangingBridge?.dispose()
         bleSessionBridge?.dispose()
+        blePeerClientBridge?.dispose()
         bleRangingBridge = BleRangingBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         bleSessionBridge = BleSessionBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        blePeerClientBridge = AndroidBlePeerClientBridge(this, flutterEngine.dartExecutor.binaryMessenger)
     }
 
     override fun onRequestPermissionsResult(
@@ -32,6 +35,9 @@ class MainActivity : FlutterActivity() {
         permissions: Array<out String>,
         grantResults: IntArray,
     ) {
+        if (blePeerClientBridge?.onRequestPermissionsResult(requestCode, permissions, grantResults) == true) {
+            return
+        }
         if (bleSessionBridge?.onRequestPermissionsResult(requestCode, permissions, grantResults) == true) {
             return
         }
@@ -44,8 +50,10 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         bleRangingBridge?.dispose()
         bleSessionBridge?.dispose()
+        blePeerClientBridge?.dispose()
         bleRangingBridge = null
         bleSessionBridge = null
+        blePeerClientBridge = null
         super.onDestroy()
     }
 
