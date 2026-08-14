@@ -1,12 +1,15 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 
 import '../../domain/capability/sensor_capability.dart';
+import 'linux_capability_probe.dart';
 
 typedef CapabilityProbe = Future<Map<Object?, Object?>> Function();
 
 class SensorCapabilityManager {
   SensorCapabilityManager({CapabilityProbe? probe})
-      : _probe = probe ?? _platformProbe;
+      : _probe = probe ?? _defaultProbe;
 
   static const _channel = MethodChannel('body_finder/capabilities');
   final CapabilityProbe _probe;
@@ -24,6 +27,13 @@ class SensorCapabilityManager {
     } on PlatformException catch (error) {
       throw CapabilityScanException(error.message ?? error.code);
     }
+  }
+
+  static Future<Map<Object?, Object?>> _defaultProbe() {
+    if (Platform.isLinux) {
+      return const LinuxCapabilityProbe().scan();
+    }
+    return _platformProbe();
   }
 
   static Future<Map<Object?, Object?>> _platformProbe() async {
