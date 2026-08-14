@@ -58,6 +58,26 @@ ServiceData.93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31: 0x6054a9f21234abcd
       );
     });
 
+    test('normalizes observed BlueZ 0x10 framing before nine-byte payload', () {
+      const line = '''
+[bluetooth]#   10 8f 4f 48 25 12 34 56 78 a7                    ..OH%.4Vx.
+''';
+      expect(
+        LinuxBleRangeAdapter.parseNodeIdFromServiceDataBytes(line),
+        '8f4f482512345678',
+      );
+    });
+
+    test('does not strip legitimate 0x10 node prefix from nine-byte payload', () {
+      const line = '''
+[bluetooth]#   10 8f 4f 48 25 12 34 56 a7                       ..OH%.4V.
+''';
+      expect(
+        LinuxBleRangeAdapter.parseNodeIdFromServiceDataBytes(line),
+        '108f4f4825123456',
+      );
+    });
+
     test('parses BlueZ hexadecimal RSSI with signed decimal in parentheses', () {
       const line =
           '[CHG] Device 4F:A2:A5:D3:53:9C RSSI: 0xffffffb1 (-79)';
