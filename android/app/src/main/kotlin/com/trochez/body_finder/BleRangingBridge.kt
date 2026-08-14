@@ -141,7 +141,7 @@ class BleRangingBridge(
             .build()
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
-            .setIncludeTxPowerLevel(true)
+            .setIncludeTxPowerLevel(false)
             .addServiceData(SERVICE_UUID, nodeBytes)
             .build()
 
