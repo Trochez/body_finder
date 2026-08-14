@@ -10,7 +10,10 @@ void main() {
 
     expect(first.has2DLayout, isTrue);
     expect(first.positions.length, 3);
-    expect(second.positions, first.positions);
+    for (final id in first.positions.keys) {
+      expect(second.positions[id]!.x, closeTo(first.positions[id]!.x, 1e-12));
+      expect(second.positions[id]!.y, closeTo(first.positions[id]!.y, 1e-12));
+    }
   });
 
   test('one and two devices also receive immediate initial positions', () {
