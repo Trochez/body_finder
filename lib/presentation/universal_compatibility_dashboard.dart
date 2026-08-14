@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../application/diagnostics/session_validation_recorder.dart';
 import '../application/orchestration/portability_policy.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
@@ -9,6 +10,7 @@ import '../infrastructure/network/lan_peer_discovery.dart';
 import '../infrastructure/ranging/ble_range_adapter.dart';
 import 'capability_dashboard.dart';
 import 'node_geometry_panel.dart';
+import 'validation_report_panel.dart';
 
 class UniversalCompatibilityDashboard extends StatefulWidget {
   const UniversalCompatibilityDashboard({
@@ -32,7 +34,11 @@ class _UniversalCompatibilityDashboardState
   late final BleRangeAdapter _bleRanging;
   late Future<NodeCapabilities> _scan;
 
+  final SessionValidationRecorder _validationRecorder =
+      SessionValidationRecorder();
+
   PeerDiscoverySnapshot? _peerSnapshot;
+  SessionValidationReport? _lastValidationReport;
   bool _sessionStarting = false;
   bool _sessionRunning = false;
   String? _sessionError;
@@ -59,7 +65,17 @@ class _UniversalCompatibilityDashboardState
 
   void _rescan() => setState(() => _scan = _manager.scan());
 
+  void _recordSnapshot(PeerDiscoverySnapshot snapshot) {
+    _validationRecorder.recordTopology(
+      nodeIds: snapshot.peers.map((peer) => peer.id),
+      metricNodeCount: snapshot.positionedNodeCount,
+      rangeEdgeCount: snapshot.rangeObservationCount,
+    );
+    _validationRecorder.recordTransports(_discovery.activeTransportIds);
+  }
+
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
+    _recordSnapshot(snapshot);
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
   }
@@ -75,6 +91,13 @@ class _UniversalCompatibilityDashboardState
       nodeId: _discovery.nodeId,
       onStatus: _onBleStatus,
       onRange: (update) {
+        _validationRecorder.recordPhysicalRange(
+          peerNodeId: update.peerNodeId,
+          source: BleRangeAdapter.source.name,
+          distanceMeters: update.distanceMeters,
+          sigmaMeters: update.sigmaMeters,
+          rssiDbm: update.rssiDbm,
+        );
         _discovery.publishLocalRange(
           peerNodeId: update.peerNodeId,
           distanceMeters: update.distanceMeters,
@@ -87,18 +110,22 @@ class _UniversalCompatibilityDashboardState
 
   Future<void> _startSession() async {
     if (_sessionStarting || _sessionRunning) return;
+    _validationRecorder.reset();
     setState(() {
       _sessionStarting = true;
       _sessionError = null;
+      _lastValidationReport = null;
     });
 
     try {
       await _discovery.start();
       if (!mounted) return;
+      final snapshot = _discovery.snapshot;
+      _recordSnapshot(snapshot);
       setState(() {
         _sessionStarting = false;
         _sessionRunning = true;
-        _peerSnapshot = _discovery.snapshot;
+        _peerSnapshot = snapshot;
       });
       unawaited(_startAutomaticRanging());
     } catch (error) {
@@ -112,6 +139,7 @@ class _UniversalCompatibilityDashboardState
   }
 
   Future<void> _stopSession() async {
+    final finalReport = _validationRecorder.report;
     await _bleRanging.stop();
     await _discovery.stop();
     if (!mounted) return;
@@ -120,6 +148,7 @@ class _UniversalCompatibilityDashboardState
       _peerSnapshot = null;
       _sessionError = null;
       _bleRangingStatus = 'idle';
+      _lastValidationReport = finalReport;
     });
   }
 
@@ -208,7 +237,7 @@ class _UniversalCompatibilityDashboardState
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Put every test device on the same local network. Wi-Fi and Ethernet participants can coexist. Nodes may join or leave at any time; the active topology and relative positioning graph update continuously.',
+                  'Session/control transport and physical sensing are separate. In this build LAN/UDP can carry session messages, but Wi-Fi LAN and Ethernet contribute zero physical sensing evidence. Offline BLE session transport is being integrated on the same transport-independent session engine.',
                 ),
                 const SizedBox(height: 12),
                 Card(
@@ -245,6 +274,9 @@ class _UniversalCompatibilityDashboardState
                           ),
                           Text(
                             'Coordinator: ${_shortId(_peerSnapshot!.coordinatorId)}',
+                          ),
+                          Text(
+                            'Active transport(s): ${_discovery.activeTransportIds.join(', ')} · transport only',
                           ),
                           Text('BLE automatic ranging: $_bleRangingStatus'),
                           const SizedBox(height: 8),
@@ -315,6 +347,14 @@ class _UniversalCompatibilityDashboardState
                   NodeGeometryPanel(
                     discovery: _discovery,
                     snapshot: _peerSnapshot!,
+                  ),
+                  const SizedBox(height: 12),
+                  ValidationReportPanel(report: _validationRecorder.report),
+                ] else if (_lastValidationReport != null) ...[
+                  const SizedBox(height: 12),
+                  ValidationReportPanel(
+                    report: _lastValidationReport!,
+                    live: false,
                   ),
                 ],
               ],
