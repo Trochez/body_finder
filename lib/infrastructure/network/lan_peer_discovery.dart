@@ -5,6 +5,7 @@ import 'dart:math';
 
 import '../../application/session/coordinator_election.dart';
 import '../../application/session/peer_registry.dart';
+import '../../domain/geometry/vec2.dart';
 
 class PeerDiscoverySnapshot {
   const PeerDiscoverySnapshot({
@@ -17,7 +18,8 @@ class PeerDiscoverySnapshot {
   final List<PeerRecord> peers;
   final String? coordinatorId;
 
-  int get phoneCount => peers.length;
+  int get nodeCount => peers.length;
+  int get phoneCount => nodeCount;
 }
 
 typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
@@ -26,8 +28,10 @@ class LanPeerDiscovery {
   LanPeerDiscovery({
     PeerDiscoveryListener? onChanged,
     String? nodeId,
+    String? platform,
   })  : onChanged = onChanged,
-        nodeId = nodeId ?? _newNodeId();
+        nodeId = nodeId ?? _newNodeId(),
+        platform = platform ?? Platform.operatingSystem;
 
   static const int port = 45892;
   static const String protocol = 'body_finder_peer_v1';
@@ -36,14 +40,17 @@ class LanPeerDiscovery {
 
   final PeerDiscoveryListener? onChanged;
   final String nodeId;
+  final String platform;
   final PeerRegistry _registry = PeerRegistry();
 
   RawDatagramSocket? _socket;
   StreamSubscription<RawSocketEvent>? _socketSubscription;
   Timer? _announceTimer;
   Timer? _expireTimer;
+  Vec2? _localPosition;
 
   bool get isRunning => _socket != null;
+  Vec2? get localPosition => _localPosition;
 
   PeerDiscoverySnapshot get snapshot => PeerDiscoverySnapshot(
         localNodeId: nodeId,
@@ -86,6 +93,13 @@ class LanPeerDiscovery {
     _socket = null;
   }
 
+  void updateLocalPosition(Vec2? position) {
+    _localPosition = position;
+    _refreshLocalRecord();
+    if (isRunning) _announce();
+    _emit();
+  }
+
   void _handleSocketEvent(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
 
@@ -105,7 +119,16 @@ class LanPeerDiscovery {
       if (remoteNodeId is! String || remoteNodeId.isEmpty) return;
       if (remoteNodeId == nodeId) return;
 
-      _registry.seen(remoteNodeId, _nowMicros());
+      final remotePlatform = decoded['platform'];
+      final hasPosition = decoded.containsKey('position');
+      final remotePosition = _decodePosition(decoded['position']);
+      _registry.seen(
+        remoteNodeId,
+        _nowMicros(),
+        platform: remotePlatform is String ? remotePlatform : null,
+        position: remotePosition,
+        positionProvided: hasPosition,
+      );
       _emit();
     } on FormatException {
       // Ignore unrelated LAN traffic on the discovery port.
@@ -120,6 +143,8 @@ class LanPeerDiscovery {
     final payload = utf8.encode(jsonEncode({
       'protocol': protocol,
       'nodeId': nodeId,
+      'platform': platform,
+      'position': _localPosition?.toJson(),
       'timestampMicros': _nowMicros(),
     }));
 
@@ -132,7 +157,13 @@ class LanPeerDiscovery {
   }
 
   void _refreshLocalRecord() {
-    _registry.seen(nodeId, _nowMicros());
+    _registry.seen(
+      nodeId,
+      _nowMicros(),
+      platform: platform,
+      position: _localPosition,
+      positionProvided: true,
+    );
   }
 
   void _expireStalePeers() {
@@ -149,6 +180,14 @@ class LanPeerDiscovery {
   }
 
   void _emit() => onChanged?.call(snapshot);
+
+  static Vec2? _decodePosition(Object? raw) {
+    if (raw is! Map) return null;
+    final x = raw['x'];
+    final y = raw['y'];
+    if (x is! num || y is! num) return null;
+    return Vec2(x.toDouble(), y.toDouble());
+  }
 
   static int _nowMicros() => DateTime.now().microsecondsSinceEpoch;
 
