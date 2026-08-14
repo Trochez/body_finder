@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import '../bluetooth/ble_peer_identity_registry.dart';
+
 class LinuxBleRangeSample {
   const LinuxBleRangeSample({
     required this.peerNodeId,
@@ -18,11 +20,16 @@ class LinuxBleRangeSample {
 }
 
 class LinuxBleRangeAdapter {
+  LinuxBleRangeAdapter({BlePeerIdentityRegistry? identityRegistry})
+      : _identityRegistry = identityRegistry ?? BlePeerIdentityRegistry.instance;
+
   static const serviceUuid = '93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31';
   static const _pathLossExponent = 2.2;
   static const _fallbackTxPowerDbm = -59.0;
   static const _minEmitInterval = Duration(milliseconds: 500);
   static const _diagnosticInterval = Duration(seconds: 5);
+
+  final BlePeerIdentityRegistry _identityRegistry;
 
   Process? _scanner;
   StreamSubscription<String>? _stdoutSub;
@@ -35,9 +42,9 @@ class LinuxBleRangeAdapter {
   final Map<String, double> _smoothedRssi = <String, double>{};
   final Map<String, DateTime> _lastEmit = <String, DateTime>{};
   final Map<String, double> _latestRssiByAddress = <String, double>{};
-  final Map<String, String> _peerNodeIdByAddress = <String, String>{};
+  final Map<String, String> _advertisedNodeIdByAddress = <String, String>{};
   final Set<String> _seenAddresses = <String>{};
-  final Set<String> _matchedPeerIds = <String>{};
+  final Set<String> _bodyFinderAddresses = <String>{};
   String? _pendingServiceDataAddress;
   String? _lastStatus;
 
@@ -94,9 +101,11 @@ class LinuxBleRangeAdapter {
         }
       });
 
-      // Scan all LE advertisements. Android carries the Body Finder UUID as
-      // service data and some BlueZ releases do not apply UUID discovery
-      // filters consistently to compact legacy advertisements.
+      // Scan all LE advertisements. The service UUID identifies a Body Finder
+      // endpoint, but its human-readable ServiceData bytes are no longer used
+      // as the authoritative logical identity on Linux. The BLE session
+      // transport binds address -> persistent nodeId after receiving a valid
+      // Body Finder session payload.
       process.stdin.writeln('menu scan');
       process.stdin.writeln('transport le');
       process.stdin.writeln('duplicate-data on');
@@ -138,9 +147,9 @@ class LinuxBleRangeAdapter {
     _smoothedRssi.clear();
     _lastEmit.clear();
     _latestRssiByAddress.clear();
-    _peerNodeIdByAddress.clear();
+    _advertisedNodeIdByAddress.clear();
     _seenAddresses.clear();
-    _matchedPeerIds.clear();
+    _bodyFinderAddresses.clear();
     _pendingServiceDataAddress = null;
     _onRange = null;
     _onStatus = null;
@@ -151,24 +160,17 @@ class LinuxBleRangeAdapter {
   void _handleScanLine(String line) {
     final clean = stripAnsi(line);
 
-    // BlueZ prints the service-data header and byte payload on separate lines:
-    // [CHG] Device AA:BB:... ServiceData.<uuid>:
-    //   d9 c6 fb 15 09 03 e0 59
+    // BlueZ prints the service-data header and byte payload on separate lines.
+    // The payload is kept as a discovery diagnostic only; its exact text
+    // representation is not trusted as the persistent session identity.
     final pendingAddress = _pendingServiceDataAddress;
     if (pendingAddress != null && !clean.contains('Device ')) {
-      final nodeId = parseNodeIdFromServiceDataBytes(clean);
-      if (nodeId != null) {
+      final advertisedNodeId = parseNodeIdFromServiceDataBytes(clean);
+      if (advertisedNodeId != null) {
         _pendingServiceDataAddress = null;
-        if (nodeId != _localNodeId) {
-          _peerNodeIdByAddress[pendingAddress] = nodeId;
-          _matchedPeerIds.add(nodeId);
-          final rssi = _latestRssiByAddress[pendingAddress];
-          if (rssi == null) {
-            _status('peerMatchedWaitingRssi');
-          } else {
-            _emitRange(pendingAddress, nodeId, rssi);
-          }
-        }
+        _advertisedNodeIdByAddress[pendingAddress] = advertisedNodeId;
+        final rssi = _latestRssiByAddress[pendingAddress];
+        if (rssi != null) _emitRangeIfIdentityBound(pendingAddress, rssi);
         return;
       }
     }
@@ -178,23 +180,33 @@ class LinuxBleRangeAdapter {
     ).firstMatch(clean);
     if (addressMatch == null) return;
 
-    final address = addressMatch.group(1)!;
+    final address = addressMatch.group(1)!.toUpperCase();
     _seenAddresses.add(address);
 
     final lower = clean.toLowerCase();
     if (lower.contains('servicedata.${serviceUuid.toLowerCase()}')) {
+      _bodyFinderAddresses.add(address);
       _pendingServiceDataAddress = address;
+      _status('peerMatchedAwaitingSessionIdentity');
       return;
     }
 
     final rssi = parseRssiFromScanLine(clean);
     if (rssi == null || !rssi.isFinite) return;
     _latestRssiByAddress[address] = rssi;
-
-    final peerNodeId = _peerNodeIdByAddress[address];
-    if (peerNodeId != null && peerNodeId != _localNodeId) {
-      _emitRange(address, peerNodeId, rssi);
+    if (_bodyFinderAddresses.contains(address)) {
+      _emitRangeIfIdentityBound(address, rssi);
     }
+  }
+
+  void _emitRangeIfIdentityBound(String address, double rawRssi) {
+    final peerNodeId = _identityRegistry.nodeIdForSource(address);
+    if (peerNodeId == null) {
+      _status('peerMatchedAwaitingSessionIdentity');
+      return;
+    }
+    if (peerNodeId == _localNodeId) return;
+    _emitRange(address, peerNodeId, rawRssi);
   }
 
   void _emitRange(String address, String peerNodeId, double rawRssi) {
@@ -224,8 +236,15 @@ class LinuxBleRangeAdapter {
   }
 
   void _emitDiagnosticStatus() {
-    if (_scanner == null || _matchedPeerIds.isNotEmpty) return;
-    if (_seenAddresses.isEmpty) {
+    if (_scanner == null) return;
+    if (_bodyFinderAddresses.any(
+      (address) => _identityRegistry.nodeIdForSource(address) != null,
+    )) {
+      return;
+    }
+    if (_bodyFinderAddresses.isNotEmpty) {
+      _status('peerMatchedAwaitingSessionIdentity');
+    } else if (_seenAddresses.isEmpty) {
       _status('scanningNoAdvertisements');
     } else {
       _status('scanningNoBodyFinderPeers');
@@ -262,12 +281,9 @@ class LinuxBleRangeAdapter {
     return direct == null ? null : double.tryParse(direct);
   }
 
-  /// Parses the payload line that follows Body Finder's BlueZ ServiceData
-  /// header. The persistent node ID is eight bytes. Physical validation with
-  /// the nine-byte (ID + freshness) Android advertisement showed one BlueZ
-  /// monitor form with an additional leading 0x10 byte. Only normalize that
-  /// prefix when at least ten byte tokens are present; an ordinary nine-byte
-  /// payload whose legitimate node ID starts with 0x10 must remain untouched.
+  /// Parses Body Finder ServiceData only as a diagnostic hint. Linux session
+  /// and ranging identity no longer depends on this value; the authoritative
+  /// mapping is learned from a valid reassembled Body Finder session payload.
   static String? parseNodeIdFromServiceDataBytes(String text) {
     final clean = stripAnsi(text).toLowerCase().replaceAll('0x', ' ');
     var bytes = RegExp(r'\b([0-9a-f]{2})\b')
