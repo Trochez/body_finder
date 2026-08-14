@@ -16,6 +16,23 @@ void main() {
         source: RangeSource.uwb,
       );
 
+  RangeObservation observation(
+    String a,
+    String b,
+    double distance, {
+    required RangeSource source,
+    required int timestamp,
+    required double sigma,
+  }) =>
+      RangeObservation(
+        fromNodeId: a,
+        toNodeId: b,
+        distanceMeters: distance,
+        sigmaMeters: sigma,
+        timestampMicros: timestamp,
+        source: source,
+      );
+
   test('three pairwise ranges create a deterministic 2D frame', () {
     final result = solver.solve(
       activeNodeIds: const ['a', 'b', 'c'],
@@ -30,6 +47,23 @@ void main() {
     expect(result.unresolvedNodeIds, isEmpty);
     expect(result.positions['a']!.position.x, closeTo(0, 1e-6));
     expect(result.positions['a']!.position.y, closeTo(0, 1e-6));
+    expect(result.positions['b']!.position.x, closeTo(4, 1e-6));
+    expect(result.positions['c']!.position.x, closeTo(1, 1e-6));
+    expect(result.positions['c']!.position.y, closeTo(3, 1e-6));
+  });
+
+  test('higher precision UWB wins over a fresher BLE observation', () {
+    final result = solver.solve(
+      activeNodeIds: const ['a', 'b', 'c'],
+      observations: [
+        observation('a', 'b', 4, source: RangeSource.uwb, timestamp: 100, sigma: 0.08),
+        observation('a', 'b', 9, source: RangeSource.bleRssi, timestamp: 500, sigma: 4),
+        observation('a', 'c', math.sqrt(10), source: RangeSource.uwb, timestamp: 100, sigma: 0.08),
+        observation('b', 'c', math.sqrt(18), source: RangeSource.uwb, timestamp: 100, sigma: 0.08),
+      ],
+    );
+
+    expect(result.has2DFrame, isTrue);
     expect(result.positions['b']!.position.x, closeTo(4, 1e-6));
     expect(result.positions['c']!.position.x, closeTo(1, 1e-6));
     expect(result.positions['c']!.position.y, closeTo(3, 1e-6));
