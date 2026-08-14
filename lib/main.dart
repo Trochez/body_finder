@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'infrastructure/capabilities/sensor_capability_manager.dart';
 import 'presentation/universal_compatibility_dashboard.dart';
 
 void main() {
@@ -7,7 +8,9 @@ void main() {
 }
 
 class BodyFinderApp extends StatelessWidget {
-  const BodyFinderApp({super.key});
+  const BodyFinderApp({super.key, this.manager});
+
+  final SensorCapabilityManager? manager;
 
   @override
   Widget build(BuildContext context) {
@@ -18,7 +21,7 @@ class BodyFinderApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
       ),
-      home: const UniversalCompatibilityDashboard(),
+      home: UniversalCompatibilityDashboard(manager: manager),
     );
   }
 }
