@@ -45,10 +45,7 @@ class RelativePositionSolver {
         continue;
       }
       final previous = best[observation.normalizedKey];
-      if (previous == null ||
-          observation.timestampMicros > previous.timestampMicros ||
-          (observation.timestampMicros == previous.timestampMicros &&
-              observation.sigmaMeters < previous.sigmaMeters)) {
+      if (previous == null || _prefer(observation, previous)) {
         best[observation.normalizedKey] = observation;
       }
     }
@@ -123,6 +120,23 @@ class RelativePositionSolver {
       observationCount: best.length,
     );
   }
+
+  bool _prefer(RangeObservation candidate, RangeObservation current) {
+    final candidateRank = _sourceRank(candidate.source);
+    final currentRank = _sourceRank(current.source);
+    if (candidateRank != currentRank) return candidateRank > currentRank;
+    if (candidate.timestampMicros != current.timestampMicros) {
+      return candidate.timestampMicros > current.timestampMicros;
+    }
+    return candidate.sigmaMeters < current.sigmaMeters;
+  }
+
+  int _sourceRank(RangeSource source) => switch (source) {
+        RangeSource.uwb => 4,
+        RangeSource.wifiRtt => 3,
+        RangeSource.external => 2,
+        RangeSource.bleRssi => 1,
+      };
 
   (String, String, String)? _bestTriangle(
     List<String> ids,
