@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'ble_session_framer.dart';
@@ -29,6 +30,17 @@ abstract interface class BleSessionPlatformAdapter {
   Future<void> sendChunk(Uint8List chunk);
 
   Future<void> stop();
+}
+
+/// Optional hook for platform adapters that need to bind a transport-level
+/// source key (for example a BLE MAC address) to Body Finder's persistent node
+/// identity after a complete session payload has been received.
+///
+/// The session payload is authoritative for logical membership. Advertisement
+/// bytes remain discovery hints only and are not required to be parsed before a
+/// GATT connection can be established.
+abstract interface class BleSessionPeerIdentityBinder {
+  void bindPeerIdentity({required String sourceKey, required String nodeId});
 }
 
 /// Body Finder session/control traffic over BLE.
@@ -109,14 +121,40 @@ class BleSessionTransport implements SessionTransport {
       sourceKey: incoming.sourceKey,
       chunk: incoming.bytes,
     );
-    if (complete != null) {
-      _onMessage?.call(complete);
+    if (complete == null) return;
+
+    final binder = _platformAdapter;
+    if (binder is BleSessionPeerIdentityBinder) {
+      final peerNodeId = _peerNodeIdFromPayload(complete);
+      if (peerNodeId != null) {
+        binder.bindPeerIdentity(
+          sourceKey: incoming.sourceKey,
+          nodeId: peerNodeId,
+        );
+      }
     }
+    _onMessage?.call(complete);
   }
 
   void _setStatus(String value) {
     if (value.isEmpty || _status == value) return;
     _status = value;
     _onStatus?.call(value);
+  }
+
+  static String? _peerNodeIdFromPayload(Uint8List payload) {
+    try {
+      final decoded = jsonDecode(utf8.decode(payload));
+      if (decoded is! Map<String, dynamic>) return null;
+      if (decoded['protocol'] != 'body_finder_peer_v1') return null;
+      final value = decoded['nodeId'];
+      if (value is! String) return null;
+      final normalized = value.toLowerCase();
+      return RegExp(r'^[0-9a-f]{16}$').hasMatch(normalized)
+          ? normalized
+          : null;
+    } on FormatException {
+      return null;
+    }
   }
 }
