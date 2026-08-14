@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 
 import '../../domain/geometry/range_observation.dart';
+import 'linux_ble_range_adapter.dart';
 
 class BleRangeUpdate {
   const BleRangeUpdate({
@@ -17,10 +20,12 @@ class BleRangeUpdate {
 }
 
 class BleRangeAdapter {
-  BleRangeAdapter({MethodChannel? channel})
-      : _channel = channel ?? const MethodChannel('body_finder/ble_ranging');
+  BleRangeAdapter({MethodChannel? channel, LinuxBleRangeAdapter? linuxAdapter})
+      : _channel = channel ?? const MethodChannel('body_finder/ble_ranging'),
+        _linuxAdapter = linuxAdapter ?? LinuxBleRangeAdapter();
 
   final MethodChannel _channel;
+  final LinuxBleRangeAdapter _linuxAdapter;
   void Function(BleRangeUpdate update)? _onRange;
   void Function(String status)? _onStatus;
   bool _started = false;
@@ -34,6 +39,26 @@ class BleRangeAdapter {
   }) async {
     _onRange = onRange;
     _onStatus = onStatus;
+
+    if (Platform.isLinux) {
+      final status = await _linuxAdapter.start(
+        nodeId: nodeId,
+        onStatus: onStatus,
+        onRange: (sample) {
+          _onRange?.call(
+            BleRangeUpdate(
+              peerNodeId: sample.peerNodeId,
+              distanceMeters: sample.distanceMeters,
+              sigmaMeters: sample.sigmaMeters,
+              rssiDbm: sample.rssiDbm,
+            ),
+          );
+        },
+      );
+      _started = status == 'started';
+      return status;
+    }
+
     _channel.setMethodCallHandler(_handleNativeCall);
     try {
       final response = await _channel.invokeMapMethod<String, dynamic>(
@@ -57,11 +82,13 @@ class BleRangeAdapter {
   }
 
   Future<void> stop() async {
-    if (_started) {
+    if (Platform.isLinux) {
+      await _linuxAdapter.stop();
+    } else if (_started) {
       try {
         await _channel.invokeMethod<void>('stop');
       } on MissingPluginException {
-        // Non-Android platforms intentionally have no native BLE ranging bridge yet.
+        // Platforms without a native BLE bridge remain network participants.
       } on PlatformException {
         // Stopping is best-effort during widget/application teardown.
       }
@@ -69,7 +96,9 @@ class BleRangeAdapter {
     _started = false;
     _onRange = null;
     _onStatus = null;
-    _channel.setMethodCallHandler(null);
+    if (!Platform.isLinux) {
+      _channel.setMethodCallHandler(null);
+    }
   }
 
   Future<void> _handleNativeCall(MethodCall call) async {
