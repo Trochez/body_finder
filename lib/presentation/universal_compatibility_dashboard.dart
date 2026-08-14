@@ -11,9 +11,14 @@ import 'capability_dashboard.dart';
 import 'node_geometry_panel.dart';
 
 class UniversalCompatibilityDashboard extends StatefulWidget {
-  const UniversalCompatibilityDashboard({super.key, this.manager});
+  const UniversalCompatibilityDashboard({
+    super.key,
+    this.manager,
+    this.nodeId,
+  });
 
   final SensorCapabilityManager? manager;
+  final String? nodeId;
 
   @override
   State<UniversalCompatibilityDashboard> createState() =>
@@ -38,7 +43,10 @@ class _UniversalCompatibilityDashboardState
     super.initState();
     _manager = widget.manager ?? SensorCapabilityManager();
     _scan = _manager.scan();
-    _discovery = LanPeerDiscovery(onChanged: _onPeersChanged);
+    _discovery = LanPeerDiscovery(
+      onChanged: _onPeersChanged,
+      nodeId: widget.nodeId,
+    );
     _bleRanging = BleRangeAdapter();
   }
 
