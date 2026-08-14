@@ -28,6 +28,7 @@ class RelayingSessionTransport
   final List<SessionTransport> _transports;
   final Duration recentMessageTtl;
   final Map<String, DateTime> _recentMessages = <String, DateTime>{};
+  final Map<String, String> _pathStatuses = <String, String>{};
 
   SessionTransportMessageHandler? _onMessage;
   SessionTransportStatusHandler? _onStatus;
@@ -55,7 +56,14 @@ class RelayingSessionTransport
     return result;
   }
 
+  @override
+  Map<String, String> get pathStatuses =>
+      Map<String, String>.unmodifiable(_pathStatuses);
+
+  @override
   int get relayedMessageCount => _relayedMessageCount;
+
+  @override
   int get duplicateMessageCount => _duplicateMessageCount;
 
   @override
@@ -67,6 +75,7 @@ class RelayingSessionTransport
     _onMessage = onMessage;
     _onStatus = onStatus;
     _recentMessages.clear();
+    _pathStatuses.clear();
     _relayedMessageCount = 0;
     _duplicateMessageCount = 0;
 
@@ -76,11 +85,20 @@ class RelayingSessionTransport
       try {
         await transport.start(
           onMessage: (payload) => _receiveFrom(transport, payload),
-          onStatus: (status) => _onStatus?.call('${transport.id}:$status'),
+          onStatus: (status) {
+            _pathStatuses[transport.id] = status;
+            _onStatus?.call('${transport.id}:$status');
+          },
         );
-        if (transport.isRunning) started++;
+        if (transport.isRunning) {
+          started++;
+          _pathStatuses.putIfAbsent(transport.id, () => 'started');
+        } else {
+          _pathStatuses.putIfAbsent(transport.id, () => 'notRunning');
+        }
       } catch (error) {
         lastError = error;
+        _pathStatuses[transport.id] = 'failed';
         _onStatus?.call('${transport.id}:failed');
       }
     }
@@ -108,8 +126,9 @@ class RelayingSessionTransport
     for (final transport in _transports) {
       try {
         await transport.stop();
+        _pathStatuses[transport.id] = 'stopped';
       } catch (_) {
-        // Best effort: one broken child must not prevent the others stopping.
+        _pathStatuses[transport.id] = 'stopFailed';
       }
     }
     _recentMessages.clear();
@@ -154,6 +173,7 @@ class RelayingSessionTransport
     try {
       await transport.broadcast(Uint8List.fromList(payload));
     } catch (_) {
+      _pathStatuses[transport.id] = 'sendFailed';
       _onStatus?.call('${transport.id}:sendFailed');
     }
   }
