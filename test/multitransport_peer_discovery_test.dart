@@ -20,7 +20,11 @@ void main() {
 
     await first.start();
     await second.start();
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    // The first node may have sent its initial announcement before the second
+    // transport subscribed. Allow one normal heartbeat interval for both
+    // registries to converge, matching real late-join behavior.
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
 
     expect(first.snapshot.nodeCount, 2);
     expect(second.snapshot.nodeCount, 2);
