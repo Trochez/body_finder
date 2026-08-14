@@ -28,6 +28,16 @@ ServiceData.93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31: 6054a9f21234abcd
       );
     });
 
+    test('parses compact 0x-prefixed service-data node id', () {
+      const info = '''
+ServiceData.93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31: 0x6054a9f21234abcd
+''';
+      expect(
+        LinuxBleRangeAdapter.parseNodeIdFromInfo(info),
+        '6054a9f21234abcd',
+      );
+    });
+
     test('ignores devices without Body Finder service UUID', () {
       const info = '''
 Device AA:BB:CC:DD:EE:FF
