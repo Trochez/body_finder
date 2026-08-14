@@ -48,6 +48,16 @@ ServiceData.93f3b61e-5e3c-4a73-9d10-8fbc5cf4de31: 0x6054a9f21234abcd
       );
     });
 
+    test('ignores appended advertisement freshness byte for node identity', () {
+      const line = '''
+[bluetooth]#   05 c5 fc 0b 12 34 56 78 a7                       ....4Vx.
+''';
+      expect(
+        LinuxBleRangeAdapter.parseNodeIdFromServiceDataBytes(line),
+        '05c5fc0b12345678',
+      );
+    });
+
     test('parses BlueZ hexadecimal RSSI with signed decimal in parentheses', () {
       const line =
           '[CHG] Device 4F:A2:A5:D3:53:9C RSSI: 0xffffffb1 (-79)';
