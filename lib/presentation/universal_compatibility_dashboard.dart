@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 
 import '../application/diagnostics/session_validation_recorder.dart';
 import '../application/orchestration/portability_policy.dart';
+import '../application/sensing/rssi_disturbance_tracker.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
 import '../infrastructure/network/session_transport_factory.dart';
 import '../infrastructure/ranging/ble_range_adapter.dart';
 import 'capability_dashboard.dart';
+import 'experimental_disturbance_panel.dart';
 import 'node_geometry_panel.dart';
 import 'validation_report_panel.dart';
 
@@ -37,6 +39,7 @@ class _UniversalCompatibilityDashboardState
 
   final SessionValidationRecorder _validationRecorder =
       SessionValidationRecorder();
+  final RssiDisturbanceTracker _disturbanceTracker = RssiDisturbanceTracker();
 
   PeerDiscoverySnapshot? _peerSnapshot;
   SessionValidationReport? _lastValidationReport;
@@ -89,8 +92,13 @@ class _UniversalCompatibilityDashboardState
     );
   }
 
+  Iterable<String> _remotePeerIds(PeerDiscoverySnapshot snapshot) => snapshot.peers
+      .where((peer) => peer.id != snapshot.localNodeId)
+      .map((peer) => peer.id);
+
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
     _recordSnapshot(snapshot);
+    _disturbanceTracker.reconcilePeers(_remotePeerIds(snapshot));
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
   }
@@ -113,19 +121,32 @@ class _UniversalCompatibilityDashboardState
           sigmaMeters: update.sigmaMeters,
           rssiDbm: update.rssiDbm,
         );
+        _disturbanceTracker.addSample(
+          peerNodeId: update.peerNodeId,
+          rssiDbm: update.rssiDbm,
+        );
         _discovery.publishLocalRange(
           peerNodeId: update.peerNodeId,
           distanceMeters: update.distanceMeters,
           sigmaMeters: update.sigmaMeters,
           source: BleRangeAdapter.source,
         );
+        if (mounted) setState(() {});
       },
     );
+  }
+
+  void _startDisturbanceCalibration() {
+    final snapshot = _peerSnapshot;
+    if (snapshot == null) return;
+    _disturbanceTracker.startCalibration(_remotePeerIds(snapshot));
+    setState(() {});
   }
 
   Future<void> _startSession() async {
     if (_sessionStarting || _sessionRunning) return;
     _validationRecorder.reset();
+    _disturbanceTracker.reset();
     setState(() {
       _sessionStarting = true;
       _sessionError = null;
@@ -157,6 +178,7 @@ class _UniversalCompatibilityDashboardState
     final finalReport = _validationRecorder.report;
     await _bleRanging.stop();
     await _discovery.stop();
+    _disturbanceTracker.reset();
     if (!mounted) return;
     setState(() {
       _sessionRunning = false;
@@ -365,6 +387,16 @@ class _UniversalCompatibilityDashboardState
                   NodeGeometryPanel(
                     discovery: _discovery,
                     snapshot: _peerSnapshot!,
+                  ),
+                  const SizedBox(height: 12),
+                  ExperimentalDisturbancePanel(
+                    snapshot: _disturbanceTracker.snapshot(),
+                    geometryReady: _peerSnapshot!.has2DFrame &&
+                        _peerSnapshot!.rangeObservationCount >= 3,
+                    onCalibrate: _peerSnapshot!.has2DFrame &&
+                            _peerSnapshot!.rangeObservationCount >= 3
+                        ? _startDisturbanceCalibration
+                        : null,
                   ),
                   const SizedBox(height: 12),
                   ValidationReportPanel(report: _validationRecorder.report),
