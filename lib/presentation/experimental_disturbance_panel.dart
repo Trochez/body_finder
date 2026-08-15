@@ -6,12 +6,17 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
   const ExperimentalDisturbancePanel({
     super.key,
     required this.snapshot,
-    required this.geometryReady,
+    required this.sensingReady,
     required this.onCalibrate,
   });
 
   final RssiDisturbanceSnapshot snapshot;
-  final bool geometryReady;
+
+  /// Latched mobile-sensing eligibility for this session. This deliberately
+  /// does not depend on the instantaneous BLE-derived metric frame because
+  /// RSSI geometry can temporarily become unresolved while the same phones
+  /// and physical RSSI links remain usable for disturbance monitoring.
+  final bool sensingReady;
   final VoidCallback? onCalibrate;
 
   @override
@@ -42,9 +47,9 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               'This measures RF change only; it is not proof that a person is present. A quiet result never proves absence.',
             ),
             const SizedBox(height: 16),
-            if (!geometryReady) ...[
+            if (!sensingReady && snapshot.phase == DisturbancePhase.idle) ...[
               const Text(
-                'Waiting for a 3-node metric frame and three physical range edges before calibration.',
+                'Waiting for a stable 3-phone BLE session. The metric map may fluctuate and is not required for RF baseline calibration.',
               ),
             ] else if (snapshot.phase == DisturbancePhase.idle ||
                 snapshot.phase == DisturbancePhase.stale) ...[
@@ -52,7 +57,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 const Padding(
                   padding: EdgeInsets.only(bottom: 8),
                   child: Text(
-                    'Node membership changed. Capture a new baseline before interpreting disturbance values.',
+                    'A different phone joined the calibrated topology. Capture a new baseline before interpreting disturbance values.',
                   ),
                 ),
               SizedBox(
@@ -66,6 +71,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               const SizedBox(height: 8),
               const Text(
                 'Keep all phones fixed and keep the scene as unchanged as possible during calibration. '
+                'The button remains available even if the BLE metric map briefly reconverges. '
                 'A person already present during calibration may become part of the baseline.',
               ),
             ] else if (snapshot.phase == DisturbancePhase.calibrating) ...[
@@ -75,7 +81,38 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               LinearProgressIndicator(value: snapshot.baselineProgress),
+              const SizedBox(height: 8),
+              const Text(
+                'Calibration will switch to monitoring automatically when every calibrated BLE link has enough samples.',
+              ),
             ] else ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.sensors,
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'MONITORING ACTIVE — no extra button is required. Keep the phones fixed while observing the RF disturbance index.',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: theme.colorScheme.onPrimaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
               _OverallDisturbance(snapshot: snapshot),
               const SizedBox(height: 16),
               if (snapshot.links.isEmpty)
@@ -183,7 +220,7 @@ class _PhaseChip extends StatelessWidget {
     final text = switch (phase) {
       DisturbancePhase.idle => 'NOT CALIBRATED',
       DisturbancePhase.calibrating => 'CALIBRATING',
-      DisturbancePhase.monitoring => 'MONITORING',
+      DisturbancePhase.monitoring => 'MONITORING ACTIVE',
       DisturbancePhase.stale => 'RECALIBRATE',
     };
     return Chip(label: Text(text));
