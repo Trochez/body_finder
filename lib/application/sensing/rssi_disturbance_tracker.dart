@@ -97,13 +97,15 @@ class RssiDisturbanceTracker {
     }
   }
 
-  /// Marks the baseline stale when the physical/session topology changes.
-  /// The user must capture a new baseline instead of silently comparing two
-  /// different geometries.
+  /// Keeps a captured baseline across temporary BLE/session dropouts from the
+  /// same phones. A missing calibrated peer simply ages out and contributes
+  /// zero fresh quality until it reconnects. The baseline becomes stale only
+  /// when a new/different peer identity appears, because that is a genuinely
+  /// different RF topology and must not be compared with the old baseline.
   void reconcilePeers(Iterable<String> peerNodeIds) {
     if (_phase == DisturbancePhase.idle) return;
     final peers = peerNodeIds.where((value) => value.isNotEmpty).toSet();
-    if (!_setEquals(peers, _requiredPeerIds)) {
+    if (peers.any((peer) => !_requiredPeerIds.contains(peer))) {
       _phase = DisturbancePhase.stale;
     }
   }
@@ -158,15 +160,13 @@ class RssiDisturbanceTracker {
     final variabilityScore = _unit((variabilityRatio - 0.8) / 2.7);
 
     // A strong persistent level shift is sufficient to reach a high score on
-    // its own. Variability can add supporting evidence but is not required;
-    // the previous weighted sum incorrectly capped a static level shift at
-    // 72/100 even when it was many robust sigmas away from baseline.
+    // its own. Variability can add supporting evidence but is not required.
     final instant = _unit(
       1 - (1 - levelScore) * (1 - variabilityScore * 0.45),
     );
 
     // EWMA suppresses one-packet spikes while remaining responsive enough for
-    // field experiments with the current ~2 Hz BLE ranging cadence.
+    // field experiments with the current BLE ranging cadence.
     state.smoothedScore = state.scoredSamples == 0
         ? instant
         : state.smoothedScore * 0.72 + instant * 0.28;
@@ -256,9 +256,6 @@ class RssiDisturbanceTracker {
   }
 
   static double _unit(num value) => value.clamp(0.0, 1.0).toDouble();
-
-  static bool _setEquals(Set<String> left, Set<String> right) =>
-      left.length == right.length && left.containsAll(right);
 }
 
 class _LinkState {
