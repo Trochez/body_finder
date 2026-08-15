@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:body_finder/infrastructure/network/ble_session_framer.dart';
 import 'package:body_finder/infrastructure/network/ble_session_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -83,21 +84,8 @@ void main() {
     final received = <Uint8List>[];
     await transport.start(onMessage: received.add);
 
-    final payload = Uint8List.fromList(
-      utf8.encode(
-        jsonEncode(<String, Object>{
-          'protocol': 'body_finder_peer_v1',
-          'nodeId': '8f4f4825aabbccdd',
-          'platform': 'android',
-          'timestampMicros': 1,
-          'ranges': const <Object>[],
-        }),
-      ),
-    );
-    await transport.broadcast(payload);
-    final chunks = platform.sentChunks.toList(growable: false);
-    platform.sentChunks.clear();
-    for (final chunk in chunks) {
+    final payload = _heartbeat('8f4f4825aabbccdd');
+    for (final chunk in BleSessionFramer().fragment(payload)) {
       platform.emit('4F:A2:A5:D3:53:9C', chunk);
     }
 
@@ -106,7 +94,70 @@ void main() {
     expect(platform.boundNodeId, '8f4f4825aabbccdd');
     await transport.stop();
   });
+
+  test('gossips a peer heartbeat across a BLE chain without a direct full mesh', () async {
+    final platformA = _MeshBleSessionPlatformAdapter('phone-a');
+    final platformB = _MeshBleSessionPlatformAdapter('phone-b');
+    final platformC = _MeshBleSessionPlatformAdapter('phone-c');
+    platformA.link(platformB);
+    platformB.link(platformA);
+    platformB.link(platformC);
+    platformC.link(platformB);
+
+    final transportA = BleSessionTransport(
+      nodeId: 'aaaaaaaaaaaaaaaa',
+      platformAdapter: platformA,
+    );
+    final transportB = BleSessionTransport(
+      nodeId: 'bbbbbbbbbbbbbbbb',
+      platformAdapter: platformB,
+    );
+    final transportC = BleSessionTransport(
+      nodeId: 'cccccccccccccccc',
+      platformAdapter: platformC,
+    );
+
+    final receivedA = <Uint8List>[];
+    final receivedB = <Uint8List>[];
+    final receivedC = <Uint8List>[];
+    await transportA.start(onMessage: receivedA.add);
+    await transportB.start(onMessage: receivedB.add);
+    await transportC.start(onMessage: receivedC.add);
+
+    final heartbeat = _heartbeat('cccccccccccccccc');
+    await transportC.broadcast(heartbeat);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    expect(receivedB, hasLength(1));
+    expect(receivedB.single, orderedEquals(heartbeat));
+    expect(receivedA, hasLength(1));
+    expect(receivedA.single, orderedEquals(heartbeat));
+    expect(receivedC, isEmpty, reason: 'local heartbeat echoes must be suppressed');
+    expect(transportB.gossipRelayCount, greaterThanOrEqualTo(1));
+    expect(transportA.gossipRelayCount, greaterThanOrEqualTo(1));
+    expect(
+      transportB.gossipDuplicateCount + transportC.gossipDuplicateCount,
+      greaterThanOrEqualTo(1),
+      reason: 'the relay loop should terminate through duplicate suppression',
+    );
+
+    await transportA.stop();
+    await transportB.stop();
+    await transportC.stop();
+  });
 }
+
+Uint8List _heartbeat(String nodeId) => Uint8List.fromList(
+      utf8.encode(
+        jsonEncode(<String, Object>{
+          'protocol': 'body_finder_peer_v1',
+          'nodeId': nodeId,
+          'platform': 'android',
+          'timestampMicros': 1,
+          'ranges': const <Object>[],
+        }),
+      ),
+    );
 
 class _FakeBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
   _FakeBleSessionPlatformAdapter({this.startStatus = 'started'});
@@ -149,6 +200,24 @@ class _FakeBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
         bytes: Uint8List.fromList(chunk),
       ),
     );
+  }
+}
+
+class _MeshBleSessionPlatformAdapter extends _FakeBleSessionPlatformAdapter {
+  _MeshBleSessionPlatformAdapter(this.sourceKey);
+
+  final String sourceKey;
+  final List<_MeshBleSessionPlatformAdapter> _neighbors = [];
+
+  void link(_MeshBleSessionPlatformAdapter peer) {
+    if (!_neighbors.contains(peer)) _neighbors.add(peer);
+  }
+
+  @override
+  Future<void> sendChunk(Uint8List chunk) async {
+    for (final peer in _neighbors) {
+      peer.emit(sourceKey, chunk);
+    }
   }
 }
 
