@@ -60,12 +60,23 @@ class LanPeerDiscovery {
   })  : onChanged = onChanged,
         nodeId = nodeId ?? _newNodeId(),
         platform = platform ?? Platform.operatingSystem,
-        _transports = transports ?? <SessionTransport>[UdpLanTransport(port: port)];
+        _transports =
+            transports ?? <SessionTransport>[UdpLanTransport(port: port)];
 
   static const int port = 45892;
   static const String protocol = 'body_finder_peer_v1';
   static const Duration announceEvery = Duration(seconds: 1);
-  static const Duration peerTimeout = Duration(seconds: 4);
+
+  /// Logical membership deliberately has more hysteresis than the previous
+  /// four-second timeout. Commodity-phone BLE can lose several fragmented GATT
+  /// messages without the device actually leaving the rescue session.
+  static const Duration peerTimeout = Duration(seconds: 10);
+
+  /// A phone advertises another peer in its compact roster only while it has
+  /// recently received that peer's own heartbeat. Roster-derived peers are not
+  /// re-advertised, preventing stale membership from sustaining itself in a
+  /// loop after the originating phone disappears.
+  static const Duration directRosterTimeout = Duration(seconds: 5);
   static const Duration rangeTimeout = Duration(seconds: 6);
 
   final PeerDiscoveryListener? onChanged;
@@ -74,9 +85,15 @@ class LanPeerDiscovery {
   final List<SessionTransport> _transports;
   final PeerRegistry _registry = PeerRegistry();
   final RelativePositionSolver _positionSolver = const RelativePositionSolver();
-  final BootstrapLayoutSolver _bootstrapLayoutSolver = const BootstrapLayoutSolver();
+  final BootstrapLayoutSolver _bootstrapLayoutSolver =
+      const BootstrapLayoutSolver();
   final Map<String, RangeObservation> _localRanges = {};
   final Map<String, _ReceivedRange> _ranges = {};
+
+  /// Peers whose *own* heartbeat has been received by this node. This is kept
+  /// separate from the logical registry so an indirectly learned peer is never
+  /// re-gossiped indefinitely.
+  final Map<String, _SelfOriginPeer> _selfOriginPeers = {};
 
   Timer? _announceTimer;
   Timer? _expireTimer;
@@ -184,6 +201,7 @@ class LanPeerDiscovery {
     _expireTimer?.cancel();
     _announceTimer = null;
     _expireTimer = null;
+    _selfOriginPeers.clear();
 
     for (final transport in _transports) {
       await transport.stop();
@@ -223,20 +241,56 @@ class LanPeerDiscovery {
       if (decoded['protocol'] != protocol) return;
 
       final remoteNodeId = decoded['nodeId'];
-      if (remoteNodeId is! String || remoteNodeId.isEmpty) return;
-      if (remoteNodeId == nodeId) return;
+      if (remoteNodeId is! String || !_isValidNodeId(remoteNodeId)) return;
+      final normalizedRemoteId = remoteNodeId.toLowerCase();
+      if (normalizedRemoteId == nodeId.toLowerCase()) return;
 
+      final now = _nowMicros();
       final remotePlatform = decoded['platform'];
-      _registry.seen(
-        remoteNodeId,
-        _nowMicros(),
-        platform: remotePlatform is String ? remotePlatform : null,
+      final normalizedPlatform =
+          remotePlatform is String && remotePlatform.isNotEmpty
+              ? remotePlatform
+              : null;
+
+      // Receiving a payload whose nodeId is the payload origin is stronger than
+      // merely hearing that ID in another peer's roster. Only these self-origin
+      // records are advertised onward in our compact roster.
+      _selfOriginPeers[normalizedRemoteId] = _SelfOriginPeer(
+        platform: normalizedPlatform,
+        seenAtMicros: now,
       );
+      _registry.seen(
+        normalizedRemoteId,
+        now,
+        platform: normalizedPlatform,
+      );
+
+      final rawKnownPeers = decoded['knownPeers'];
+      if (rawKnownPeers is List) {
+        for (final rawPeer in rawKnownPeers) {
+          if (rawPeer is! Map) continue;
+          final peerNodeId = rawPeer['nodeId'];
+          if (peerNodeId is! String || !_isValidNodeId(peerNodeId)) continue;
+          final normalizedPeerId = peerNodeId.toLowerCase();
+          if (normalizedPeerId == nodeId.toLowerCase() ||
+              normalizedPeerId == normalizedRemoteId) {
+            continue;
+          }
+          final peerPlatform = rawPeer['platform'];
+          _registry.seen(
+            normalizedPeerId,
+            now,
+            platform: peerPlatform is String && peerPlatform.isNotEmpty
+                ? peerPlatform
+                : null,
+          );
+        }
+      }
 
       final rawRanges = decoded['ranges'];
       if (rawRanges is List) {
         for (final rawRange in rawRanges) {
-          final observation = _decodeRange(remoteNodeId, rawRange);
+          final observation = _decodeRange(normalizedRemoteId, rawRange);
           if (observation != null) _storeRange(observation);
         }
       }
@@ -251,6 +305,8 @@ class LanPeerDiscovery {
 
     _refreshLocalRecord();
     final now = _nowMicros();
+    _expireSelfOriginPeers(now);
+
     final refreshedLocalRanges = <RangeObservation>[];
     for (final entry in _localRanges.entries.toList(growable: false)) {
       final refreshed = RangeObservation(
@@ -266,20 +322,41 @@ class LanPeerDiscovery {
       _storeRange(refreshed);
     }
 
-    final payload = Uint8List.fromList(utf8.encode(jsonEncode({
-      'protocol': protocol,
-      'nodeId': nodeId,
-      'platform': platform,
-      'timestampMicros': now,
-      'ranges': refreshedLocalRanges
-          .map((range) => {
-                'toNodeId': range.toNodeId,
-                'distanceMeters': range.distanceMeters,
-                'sigmaMeters': range.sigmaMeters,
-                'source': range.source.name,
-              })
-          .toList(growable: false),
-    })));
+    final knownPeers = _selfOriginPeers.entries
+        .map(
+          (entry) => <String, Object?>{
+            'nodeId': entry.key,
+            if (entry.value.platform != null)
+              'platform': entry.value.platform,
+          },
+        )
+        .toList(growable: false)
+      ..sort(
+        (left, right) =>
+            (left['nodeId']! as String).compareTo(right['nodeId']! as String),
+      );
+
+    final payload = Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'protocol': protocol,
+          'nodeId': nodeId,
+          'platform': platform,
+          'timestampMicros': now,
+          'knownPeers': knownPeers,
+          'ranges': refreshedLocalRanges
+              .map(
+                (range) => {
+                  'toNodeId': range.toNodeId,
+                  'distanceMeters': range.distanceMeters,
+                  'sigmaMeters': range.sigmaMeters,
+                  'source': range.source.name,
+                },
+              )
+              .toList(growable: false),
+        }),
+      ),
+    );
 
     for (final transport in _transports.where((value) => value.isRunning)) {
       unawaited(transport.broadcast(payload));
@@ -297,13 +374,18 @@ class LanPeerDiscovery {
 
   void _expireStaleState() {
     final now = _nowMicros();
-    final expired = _registry.expireBefore(now - peerTimeout.inMicroseconds);
+    _expireSelfOriginPeers(now);
+    final expired =
+        _registry.expireBefore(now - peerTimeout.inMicroseconds);
     final activeIds = _registry.peers.map((peer) => peer.id).toSet()..add(nodeId);
     final staleKeys = _ranges.entries
-        .where((entry) =>
-            entry.value.receivedAtMicros < now - rangeTimeout.inMicroseconds ||
-            !activeIds.contains(entry.value.observation.fromNodeId) ||
-            !activeIds.contains(entry.value.observation.toNodeId))
+        .where(
+          (entry) =>
+              entry.value.receivedAtMicros <
+                  now - rangeTimeout.inMicroseconds ||
+              !activeIds.contains(entry.value.observation.fromNodeId) ||
+              !activeIds.contains(entry.value.observation.toNodeId),
+        )
         .map((entry) => entry.key)
         .toList(growable: false);
     for (final key in staleKeys) {
@@ -311,9 +393,15 @@ class LanPeerDiscovery {
     }
     for (final peerId in expired) {
       _localRanges.remove(peerId);
+      _selfOriginPeers.remove(peerId);
     }
     _refreshLocalRecord();
     if (expired.isNotEmpty || staleKeys.isNotEmpty) _emit();
+  }
+
+  void _expireSelfOriginPeers(int nowMicros) {
+    final cutoff = nowMicros - directRosterTimeout.inMicroseconds;
+    _selfOriginPeers.removeWhere((_, value) => value.seenAtMicros < cutoff);
   }
 
   void _storeRange(RangeObservation observation) {
@@ -351,6 +439,9 @@ class LanPeerDiscovery {
     return observation.isValid ? observation : null;
   }
 
+  static bool _isValidNodeId(String value) =>
+      RegExp(r'^[0-9a-fA-F]{16}$').hasMatch(value);
+
   static String _rangeStorageKey(String from, String to) => '$from->$to';
 
   void _emit() => onChanged?.call(snapshot);
@@ -359,10 +450,22 @@ class LanPeerDiscovery {
 
   static String _newNodeId() {
     final random = Random.secure();
-    final first = random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-    final second = random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
+    final first =
+        random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
+    final second =
+        random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
     return '$first$second';
   }
+}
+
+class _SelfOriginPeer {
+  const _SelfOriginPeer({
+    required this.platform,
+    required this.seenAtMicros,
+  });
+
+  final String? platform;
+  final int seenAtMicros;
 }
 
 class _ReceivedRange {
