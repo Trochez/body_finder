@@ -45,6 +45,8 @@ class _UniversalCompatibilityDashboardState
   SessionValidationReport? _lastValidationReport;
   bool _sessionStarting = false;
   bool _sessionRunning = false;
+  bool _mobileSensingReadyLatched = false;
+  Set<String> _mobileSensingPeerIds = const {};
   String? _sessionError;
   String _bleRangingStatus = 'idle';
 
@@ -98,7 +100,18 @@ class _UniversalCompatibilityDashboardState
 
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
     _recordSnapshot(snapshot);
-    _disturbanceTracker.reconcilePeers(_remotePeerIds(snapshot));
+    final remotePeers = _remotePeerIds(snapshot).toSet();
+
+    // RF sensing only needs a known three-phone membership plus RSSI samples.
+    // Do not tie calibration availability to the instantaneous metric solver:
+    // BLE-derived geometry can briefly become unresolved while the same phones
+    // and links remain valid for baseline/disturbance monitoring.
+    if (snapshot.nodeCount >= 3 && remotePeers.length >= 2) {
+      _mobileSensingReadyLatched = true;
+      _mobileSensingPeerIds = Set.unmodifiable(remotePeers);
+    }
+
+    _disturbanceTracker.reconcilePeers(remotePeers);
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
   }
@@ -139,7 +152,11 @@ class _UniversalCompatibilityDashboardState
   void _startDisturbanceCalibration() {
     final snapshot = _peerSnapshot;
     if (snapshot == null) return;
-    _disturbanceTracker.startCalibration(_remotePeerIds(snapshot));
+    final peers = _mobileSensingPeerIds.length >= 2
+        ? _mobileSensingPeerIds
+        : _remotePeerIds(snapshot).toSet();
+    if (peers.length < 2) return;
+    _disturbanceTracker.startCalibration(peers);
     setState(() {});
   }
 
@@ -147,6 +164,8 @@ class _UniversalCompatibilityDashboardState
     if (_sessionStarting || _sessionRunning) return;
     _validationRecorder.reset();
     _disturbanceTracker.reset();
+    _mobileSensingReadyLatched = false;
+    _mobileSensingPeerIds = const {};
     setState(() {
       _sessionStarting = true;
       _sessionError = null;
@@ -185,6 +204,8 @@ class _UniversalCompatibilityDashboardState
       _peerSnapshot = null;
       _sessionError = null;
       _bleRangingStatus = 'idle';
+      _mobileSensingReadyLatched = false;
+      _mobileSensingPeerIds = const {};
       _lastValidationReport = finalReport;
     });
   }
@@ -391,10 +412,8 @@ class _UniversalCompatibilityDashboardState
                   const SizedBox(height: 12),
                   ExperimentalDisturbancePanel(
                     snapshot: _disturbanceTracker.snapshot(),
-                    geometryReady: _peerSnapshot!.has2DFrame &&
-                        _peerSnapshot!.rangeObservationCount >= 3,
-                    onCalibrate: _peerSnapshot!.has2DFrame &&
-                            _peerSnapshot!.rangeObservationCount >= 3
+                    sensingReady: _mobileSensingReadyLatched,
+                    onCalibrate: _mobileSensingReadyLatched
                         ? _startDisturbanceCalibration
                         : null,
                   ),
