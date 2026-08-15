@@ -62,7 +62,7 @@ void main() {
     expect(snapshot.overallScore, greaterThan(0.65));
   });
 
-  test('topology change marks a captured baseline stale', () {
+  test('temporary loss of a calibrated peer preserves monitoring baseline', () {
     final tracker = RssiDisturbanceTracker(minimumBaselineSamples: 5);
     tracker.startCalibration(const ['peer-a', 'peer-b']);
     for (var i = 0; i < 5; i++) {
@@ -72,6 +72,21 @@ void main() {
     expect(tracker.snapshot().phase, DisturbancePhase.monitoring);
 
     tracker.reconcilePeers(const ['peer-a']);
+
+    expect(tracker.snapshot().phase, DisturbancePhase.monitoring);
+    expect(tracker.snapshot().requiredPeerIds, containsAll(['peer-a', 'peer-b']));
+  });
+
+  test('a different replacement peer marks captured baseline stale', () {
+    final tracker = RssiDisturbanceTracker(minimumBaselineSamples: 5);
+    tracker.startCalibration(const ['peer-a', 'peer-b']);
+    for (var i = 0; i < 5; i++) {
+      tracker.addSample(peerNodeId: 'peer-a', rssiDbm: -60);
+      tracker.addSample(peerNodeId: 'peer-b', rssiDbm: -65);
+    }
+    expect(tracker.snapshot().phase, DisturbancePhase.monitoring);
+
+    tracker.reconcilePeers(const ['peer-a', 'peer-c']);
 
     expect(tracker.snapshot().phase, DisturbancePhase.stale);
   });
