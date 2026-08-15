@@ -156,7 +156,14 @@ class RssiDisturbanceTracker {
     final recentMad = _mad(state.recentSamples);
     final variabilityRatio = recentMad / sigma;
     final variabilityScore = _unit((variabilityRatio - 0.8) / 2.7);
-    final instant = _unit(levelScore * 0.72 + variabilityScore * 0.28);
+
+    // A strong persistent level shift is sufficient to reach a high score on
+    // its own. Variability can add supporting evidence but is not required;
+    // the previous weighted sum incorrectly capped a static level shift at
+    // 72/100 even when it was many robust sigmas away from baseline.
+    final instant = _unit(
+      1 - (1 - levelScore) * (1 - variabilityScore * 0.45),
+    );
 
     // EWMA suppresses one-packet spikes while remaining responsive enough for
     // field experiments with the current ~2 Hz BLE ranging cadence.
