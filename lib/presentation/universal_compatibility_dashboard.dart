@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 
 import '../application/diagnostics/session_validation_recorder.dart';
 import '../application/orchestration/portability_policy.dart';
+import '../application/sensing/rssi_disturbance_tracker.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
 import '../infrastructure/network/lan_peer_discovery.dart';
 import '../infrastructure/network/session_transport_factory.dart';
 import '../infrastructure/ranging/ble_range_adapter.dart';
 import 'capability_dashboard.dart';
+import 'experimental_disturbance_panel.dart';
 import 'node_geometry_panel.dart';
 import 'validation_report_panel.dart';
 
@@ -37,11 +39,14 @@ class _UniversalCompatibilityDashboardState
 
   final SessionValidationRecorder _validationRecorder =
       SessionValidationRecorder();
+  final RssiDisturbanceTracker _disturbanceTracker = RssiDisturbanceTracker();
 
   PeerDiscoverySnapshot? _peerSnapshot;
   SessionValidationReport? _lastValidationReport;
   bool _sessionStarting = false;
   bool _sessionRunning = false;
+  bool _mobileSensingReadyLatched = false;
+  Set<String> _mobileSensingPeerIds = const {};
   String? _sessionError;
   String _bleRangingStatus = 'idle';
 
@@ -89,8 +94,24 @@ class _UniversalCompatibilityDashboardState
     );
   }
 
+  Iterable<String> _remotePeerIds(PeerDiscoverySnapshot snapshot) => snapshot.peers
+      .where((peer) => peer.id != snapshot.localNodeId)
+      .map((peer) => peer.id);
+
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
     _recordSnapshot(snapshot);
+    final remotePeers = _remotePeerIds(snapshot).toSet();
+
+    // RF sensing only needs a known three-phone membership plus RSSI samples.
+    // Do not tie calibration availability to the instantaneous metric solver:
+    // BLE-derived geometry can briefly become unresolved while the same phones
+    // and links remain valid for baseline/disturbance monitoring.
+    if (snapshot.nodeCount >= 3 && remotePeers.length >= 2) {
+      _mobileSensingReadyLatched = true;
+      _mobileSensingPeerIds = Set.unmodifiable(remotePeers);
+    }
+
+    _disturbanceTracker.reconcilePeers(remotePeers);
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
   }
@@ -113,19 +134,38 @@ class _UniversalCompatibilityDashboardState
           sigmaMeters: update.sigmaMeters,
           rssiDbm: update.rssiDbm,
         );
+        _disturbanceTracker.addSample(
+          peerNodeId: update.peerNodeId,
+          rssiDbm: update.rssiDbm,
+        );
         _discovery.publishLocalRange(
           peerNodeId: update.peerNodeId,
           distanceMeters: update.distanceMeters,
           sigmaMeters: update.sigmaMeters,
           source: BleRangeAdapter.source,
         );
+        if (mounted) setState(() {});
       },
     );
+  }
+
+  void _startDisturbanceCalibration() {
+    final snapshot = _peerSnapshot;
+    if (snapshot == null) return;
+    final peers = _mobileSensingPeerIds.length >= 2
+        ? _mobileSensingPeerIds
+        : _remotePeerIds(snapshot).toSet();
+    if (peers.length < 2) return;
+    _disturbanceTracker.startCalibration(peers);
+    setState(() {});
   }
 
   Future<void> _startSession() async {
     if (_sessionStarting || _sessionRunning) return;
     _validationRecorder.reset();
+    _disturbanceTracker.reset();
+    _mobileSensingReadyLatched = false;
+    _mobileSensingPeerIds = const {};
     setState(() {
       _sessionStarting = true;
       _sessionError = null;
@@ -157,12 +197,15 @@ class _UniversalCompatibilityDashboardState
     final finalReport = _validationRecorder.report;
     await _bleRanging.stop();
     await _discovery.stop();
+    _disturbanceTracker.reset();
     if (!mounted) return;
     setState(() {
       _sessionRunning = false;
       _peerSnapshot = null;
       _sessionError = null;
       _bleRangingStatus = 'idle';
+      _mobileSensingReadyLatched = false;
+      _mobileSensingPeerIds = const {};
       _lastValidationReport = finalReport;
     });
   }
@@ -365,6 +408,14 @@ class _UniversalCompatibilityDashboardState
                   NodeGeometryPanel(
                     discovery: _discovery,
                     snapshot: _peerSnapshot!,
+                  ),
+                  const SizedBox(height: 12),
+                  ExperimentalDisturbancePanel(
+                    snapshot: _disturbanceTracker.snapshot(),
+                    sensingReady: _mobileSensingReadyLatched,
+                    onCalibrate: _mobileSensingReadyLatched
+                        ? _startDisturbanceCalibration
+                        : null,
                   ),
                   const SizedBox(height: 12),
                   ValidationReportPanel(report: _validationRecorder.report),
