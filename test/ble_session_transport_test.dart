@@ -95,55 +95,24 @@ void main() {
     await transport.stop();
   });
 
-  test('gossips a peer heartbeat across a BLE chain without a direct full mesh', () async {
-    final platformA = _MeshBleSessionPlatformAdapter('phone-a');
-    final platformB = _MeshBleSessionPlatformAdapter('phone-b');
-    final platformC = _MeshBleSessionPlatformAdapter('phone-c');
-    platformA.link(platformB);
-    platformB.link(platformA);
-    platformB.link(platformC);
-    platformC.link(platformB);
-
-    final transportA = BleSessionTransport(
+  test('does not amplify an inbound heartbeat back across BLE', () async {
+    final platform = _FakeBleSessionPlatformAdapter();
+    final transport = BleSessionTransport(
       nodeId: 'aaaaaaaaaaaaaaaa',
-      platformAdapter: platformA,
+      platformAdapter: platform,
     );
-    final transportB = BleSessionTransport(
-      nodeId: 'bbbbbbbbbbbbbbbb',
-      platformAdapter: platformB,
-    );
-    final transportC = BleSessionTransport(
-      nodeId: 'cccccccccccccccc',
-      platformAdapter: platformC,
-    );
+    final received = <Uint8List>[];
+    await transport.start(onMessage: received.add);
 
-    final receivedA = <Uint8List>[];
-    final receivedB = <Uint8List>[];
-    final receivedC = <Uint8List>[];
-    await transportA.start(onMessage: receivedA.add);
-    await transportB.start(onMessage: receivedB.add);
-    await transportC.start(onMessage: receivedC.add);
+    final payload = _heartbeat('bbbbbbbbbbbbbbbb');
+    for (final chunk in BleSessionFramer().fragment(payload)) {
+      platform.emit('peer-b', chunk);
+    }
 
-    final heartbeat = _heartbeat('cccccccccccccccc');
-    await transportC.broadcast(heartbeat);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-
-    expect(receivedB, hasLength(1));
-    expect(receivedB.single, orderedEquals(heartbeat));
-    expect(receivedA, hasLength(1));
-    expect(receivedA.single, orderedEquals(heartbeat));
-    expect(receivedC, isEmpty, reason: 'local heartbeat echoes must be suppressed');
-    expect(transportB.gossipRelayCount, greaterThanOrEqualTo(1));
-    expect(transportA.gossipRelayCount, greaterThanOrEqualTo(1));
-    expect(
-      transportB.gossipDuplicateCount + transportC.gossipDuplicateCount,
-      greaterThanOrEqualTo(1),
-      reason: 'the relay loop should terminate through duplicate suppression',
-    );
-
-    await transportA.stop();
-    await transportB.stop();
-    await transportC.stop();
+    expect(received, hasLength(1));
+    expect(platform.sentChunks, isEmpty,
+        reason: 'peer sharing belongs in compact session roster metadata');
+    await transport.stop();
   });
 }
 
@@ -200,24 +169,6 @@ class _FakeBleSessionPlatformAdapter implements BleSessionPlatformAdapter {
         bytes: Uint8List.fromList(chunk),
       ),
     );
-  }
-}
-
-class _MeshBleSessionPlatformAdapter extends _FakeBleSessionPlatformAdapter {
-  _MeshBleSessionPlatformAdapter(this.sourceKey);
-
-  final String sourceKey;
-  final List<_MeshBleSessionPlatformAdapter> _neighbors = [];
-
-  void link(_MeshBleSessionPlatformAdapter peer) {
-    if (!_neighbors.contains(peer)) _neighbors.add(peer);
-  }
-
-  @override
-  Future<void> sendChunk(Uint8List chunk) async {
-    for (final peer in _neighbors) {
-      peer.emit(sourceKey, chunk);
-    }
   }
 }
 
