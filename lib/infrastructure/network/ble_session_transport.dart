@@ -48,12 +48,18 @@ abstract interface class BleSessionPeerIdentityBinder {
 /// This is a communication transport only. BLE RSSI ranging is implemented by
 /// a separate adapter and is the physical measurement source; merely carrying
 /// session bytes over BLE never creates a range or anomaly observation.
+///
+/// Valid Body Finder session payloads are also gossiped across already-linked
+/// BLE peers. This lets A <-> B <-> C converge as one logical session without
+/// requiring A and C to discover/connect to each other directly. Forwarded
+/// membership is transport metadata only; it never fabricates a physical range.
 class BleSessionTransport implements SessionTransport {
   BleSessionTransport({
     required this.nodeId,
     required BleSessionPlatformAdapter platformAdapter,
     BleSessionFramer? framer,
     BleSessionReassembler? reassembler,
+    this.gossipTtl = const Duration(seconds: 8),
   })  : _platformAdapter = platformAdapter,
         _framer = framer ?? BleSessionFramer(),
         _reassembler = reassembler ?? BleSessionReassembler();
@@ -62,10 +68,14 @@ class BleSessionTransport implements SessionTransport {
   final BleSessionPlatformAdapter _platformAdapter;
   final BleSessionFramer _framer;
   final BleSessionReassembler _reassembler;
+  final Duration gossipTtl;
+  final Map<String, DateTime> _recentSessionPayloads = <String, DateTime>{};
 
   SessionTransportMessageHandler? _onMessage;
   SessionTransportStatusHandler? _onStatus;
   String _status = 'idle';
+  int _gossipRelayCount = 0;
+  int _gossipDuplicateCount = 0;
 
   @override
   String get id => 'bleControl';
@@ -74,6 +84,8 @@ class BleSessionTransport implements SessionTransport {
   bool get isRunning => _platformAdapter.isRunning;
 
   String get status => _status;
+  int get gossipRelayCount => _gossipRelayCount;
+  int get gossipDuplicateCount => _gossipDuplicateCount;
 
   @override
   Future<void> start({
@@ -85,6 +97,9 @@ class BleSessionTransport implements SessionTransport {
       throw StateError('BLE session transport requires a 16-hex node id.');
     }
 
+    _recentSessionPayloads.clear();
+    _gossipRelayCount = 0;
+    _gossipDuplicateCount = 0;
     _onMessage = onMessage;
     _onStatus = onStatus;
     final status = await _platformAdapter.start(
@@ -102,18 +117,22 @@ class BleSessionTransport implements SessionTransport {
   @override
   Future<void> broadcast(Uint8List payload) async {
     if (!isRunning || payload.isEmpty) return;
-    for (final chunk in _framer.fragment(payload)) {
-      await _platformAdapter.sendChunk(chunk);
+    if (_peerNodeIdFromPayload(payload) != null) {
+      _rememberSessionPayload(payload);
     }
+    await _sendPayload(payload);
   }
 
   @override
   Future<void> stop() async {
     await _platformAdapter.stop();
     _reassembler.clear();
+    _recentSessionPayloads.clear();
     _onMessage = null;
     _onStatus = null;
     _status = 'idle';
+    _gossipRelayCount = 0;
+    _gossipDuplicateCount = 0;
   }
 
   void _handleChunk(BleSessionChunk incoming) {
@@ -123,17 +142,50 @@ class BleSessionTransport implements SessionTransport {
     );
     if (complete == null) return;
 
-    if (_platformAdapter is BleSessionPeerIdentityBinder) {
-      final binder = _platformAdapter as BleSessionPeerIdentityBinder;
-      final peerNodeId = _peerNodeIdFromPayload(complete);
-      if (peerNodeId != null) {
-        binder.bindPeerIdentity(
-          sourceKey: incoming.sourceKey,
-          nodeId: peerNodeId,
-        );
+    final peerNodeId = _peerNodeIdFromPayload(complete);
+    if (peerNodeId != null) {
+      _expireRecentSessionPayloads();
+      final fingerprint = _fingerprint(complete);
+      if (_recentSessionPayloads.containsKey(fingerprint)) {
+        _gossipDuplicateCount++;
+        return;
       }
+      _recentSessionPayloads[fingerprint] = DateTime.now();
     }
+
+    if (_platformAdapter is BleSessionPeerIdentityBinder && peerNodeId != null) {
+      final binder = _platformAdapter as BleSessionPeerIdentityBinder;
+      binder.bindPeerIdentity(
+        sourceKey: incoming.sourceKey,
+        nodeId: peerNodeId,
+      );
+    }
+
     _onMessage?.call(complete);
+
+    // Gossip only valid remote Body Finder session payloads. The platform
+    // adapter broadcasts chunks to its currently connected BLE peers. Echoes
+    // and loops are suppressed by the short-lived payload fingerprint cache.
+    if (peerNodeId != null && peerNodeId != nodeId) {
+      _gossipRelayCount++;
+      unawaited(_sendPayload(complete));
+    }
+  }
+
+  Future<void> _sendPayload(Uint8List payload) async {
+    for (final chunk in _framer.fragment(payload)) {
+      await _platformAdapter.sendChunk(chunk);
+    }
+  }
+
+  void _rememberSessionPayload(Uint8List payload) {
+    _expireRecentSessionPayloads();
+    _recentSessionPayloads[_fingerprint(payload)] = DateTime.now();
+  }
+
+  void _expireRecentSessionPayloads() {
+    final cutoff = DateTime.now().subtract(gossipTtl);
+    _recentSessionPayloads.removeWhere((_, seenAt) => seenAt.isBefore(cutoff));
   }
 
   void _setStatus(String value) {
@@ -156,5 +208,19 @@ class BleSessionTransport implements SessionTransport {
     } on FormatException {
       return null;
     }
+  }
+
+  /// Small deterministic FNV-1a fingerprint used only for short-lived BLE
+  /// gossip loop suppression. It is not a security or identity primitive.
+  static String _fingerprint(Uint8List bytes) {
+    const offset = 0xcbf29ce484222325;
+    const prime = 0x100000001b3;
+    const mask = 0xffffffffffffffff;
+    var hash = offset;
+    for (final byte in bytes) {
+      hash ^= byte;
+      hash = (hash * prime) & mask;
+    }
+    return hash.toRadixString(16).padLeft(16, '0');
   }
 }
