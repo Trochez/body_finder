@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../application/diagnostics/session_validation_recorder.dart';
 import '../application/orchestration/portability_policy.dart';
+import '../application/sensing/network_rf_link_sample.dart';
 import '../application/sensing/rssi_disturbance_tracker.dart';
 import '../domain/capability/sensor_capability.dart';
 import '../infrastructure/capabilities/sensor_capability_manager.dart';
@@ -39,14 +40,18 @@ class _UniversalCompatibilityDashboardState
 
   final SessionValidationRecorder _validationRecorder =
       SessionValidationRecorder();
-  final RssiDisturbanceTracker _disturbanceTracker = RssiDisturbanceTracker();
+  final RssiDisturbanceTracker _disturbanceTracker = RssiDisturbanceTracker(
+    minimumBaselineSamples: 10,
+    maximumBaselineSamples: 24,
+  );
+  final Map<String, NetworkRfLinkSample> _networkRfLinks = {};
 
   PeerDiscoverySnapshot? _peerSnapshot;
   SessionValidationReport? _lastValidationReport;
   bool _sessionStarting = false;
   bool _sessionRunning = false;
   bool _mobileSensingReadyLatched = false;
-  Set<String> _mobileSensingPeerIds = const {};
+  Set<String> _calibrationNodeIds = const {};
   String? _sessionError;
   String _bleRangingStatus = 'idle';
 
@@ -58,6 +63,7 @@ class _UniversalCompatibilityDashboardState
     final nodeId = widget.nodeId;
     _discovery = LanPeerDiscovery(
       onChanged: _onPeersChanged,
+      onRfLinkSample: _onRfLinkSample,
       nodeId: nodeId,
       transports: nodeId == null
           ? null
@@ -94,24 +100,67 @@ class _UniversalCompatibilityDashboardState
     );
   }
 
-  Iterable<String> _remotePeerIds(PeerDiscoverySnapshot snapshot) => snapshot.peers
-      .where((peer) => peer.id != snapshot.localNodeId)
-      .map((peer) => peer.id);
+  Iterable<NetworkRfLinkSample> _freshRfSamples() {
+    final cutoff = DateTime.now().subtract(LanPeerDiscovery.rfLinkTimeout);
+    _networkRfLinks.removeWhere(
+      (_, sample) => sample.observedAt.isBefore(cutoff),
+    );
+    return _networkRfLinks.values;
+  }
+
+  bool _hasCollectiveRfCoverage(PeerDiscoverySnapshot snapshot) {
+    if (snapshot.nodeCount < 3) return false;
+    final activeIds = snapshot.peers.map((peer) => peer.id).toSet();
+    final fresh = _freshRfSamples()
+        .where(
+          (sample) =>
+              activeIds.contains(sample.fromNodeId) &&
+              activeIds.contains(sample.toNodeId),
+        )
+        .toList(growable: false);
+    final participatingNodes = <String>{};
+    final undirectedEdges = <String>{};
+    for (final sample in fresh) {
+      participatingNodes
+        ..add(sample.fromNodeId)
+        ..add(sample.toNodeId);
+      undirectedEdges.add(sample.undirectedLinkId);
+    }
+    return participatingNodes.length >= 3 && undirectedEdges.length >= 2;
+  }
+
+  void _onRfLinkSample(NetworkRfLinkSample sample) {
+    if (!sample.isValid) return;
+    _networkRfLinks[sample.linkId] = sample;
+    _disturbanceTracker.addSample(
+      peerNodeId: sample.linkId,
+      rssiDbm: sample.rssiDbm,
+      observedAt: sample.observedAt,
+    );
+
+    final snapshot = _peerSnapshot;
+    if (snapshot != null && _hasCollectiveRfCoverage(snapshot)) {
+      _mobileSensingReadyLatched = true;
+    }
+    if (mounted) setState(() {});
+  }
 
   void _onPeersChanged(PeerDiscoverySnapshot snapshot) {
     _recordSnapshot(snapshot);
-    final remotePeers = _remotePeerIds(snapshot).toSet();
+    final currentNodeIds = snapshot.peers.map((peer) => peer.id).toSet();
 
-    // RF sensing only needs a known three-phone membership plus RSSI samples.
-    // Do not tie calibration availability to the instantaneous metric solver:
-    // BLE-derived geometry can briefly become unresolved while the same phones
-    // and links remain valid for baseline/disturbance monitoring.
-    if (snapshot.nodeCount >= 3 && remotePeers.length >= 2) {
-      _mobileSensingReadyLatched = true;
-      _mobileSensingPeerIds = Set.unmodifiable(remotePeers);
+    if (_calibrationNodeIds.isNotEmpty &&
+        currentNodeIds.any((nodeId) => !_calibrationNodeIds.contains(nodeId))) {
+      _disturbanceTracker.markStale();
     }
 
-    _disturbanceTracker.reconcilePeers(remotePeers);
+    // Collective RF sensing only needs a known three-phone session and at
+    // least two actual fresh physical RF edges covering all three phones. It
+    // deliberately does not depend on the instantaneous BLE-derived metric map.
+    if (_hasCollectiveRfCoverage(snapshot)) {
+      _mobileSensingReadyLatched = true;
+    }
+
     if (!mounted) return;
     setState(() => _peerSnapshot = snapshot);
   }
@@ -134,7 +183,7 @@ class _UniversalCompatibilityDashboardState
           sigmaMeters: update.sigmaMeters,
           rssiDbm: update.rssiDbm,
         );
-        _disturbanceTracker.addSample(
+        _discovery.publishLocalRfLink(
           peerNodeId: update.peerNodeId,
           rssiDbm: update.rssiDbm,
         );
@@ -152,11 +201,28 @@ class _UniversalCompatibilityDashboardState
   void _startDisturbanceCalibration() {
     final snapshot = _peerSnapshot;
     if (snapshot == null) return;
-    final peers = _mobileSensingPeerIds.length >= 2
-        ? _mobileSensingPeerIds
-        : _remotePeerIds(snapshot).toSet();
-    if (peers.length < 2) return;
-    _disturbanceTracker.startCalibration(peers);
+    final activeNodeIds = snapshot.peers.map((peer) => peer.id).toSet();
+    final fresh = _freshRfSamples()
+        .where(
+          (sample) =>
+              activeNodeIds.contains(sample.fromNodeId) &&
+              activeNodeIds.contains(sample.toNodeId),
+        )
+        .toList(growable: false);
+    final participatingNodes = <String>{};
+    final undirectedEdges = <String>{};
+    for (final sample in fresh) {
+      participatingNodes
+        ..add(sample.fromNodeId)
+        ..add(sample.toNodeId);
+      undirectedEdges.add(sample.undirectedLinkId);
+    }
+    if (participatingNodes.length < 3 || undirectedEdges.length < 2) return;
+
+    _calibrationNodeIds = Set.unmodifiable(activeNodeIds);
+    _disturbanceTracker.startCalibration(
+      fresh.map((sample) => sample.linkId).toSet(),
+    );
     setState(() {});
   }
 
@@ -164,8 +230,9 @@ class _UniversalCompatibilityDashboardState
     if (_sessionStarting || _sessionRunning) return;
     _validationRecorder.reset();
     _disturbanceTracker.reset();
+    _networkRfLinks.clear();
     _mobileSensingReadyLatched = false;
-    _mobileSensingPeerIds = const {};
+    _calibrationNodeIds = const {};
     setState(() {
       _sessionStarting = true;
       _sessionError = null;
@@ -198,6 +265,7 @@ class _UniversalCompatibilityDashboardState
     await _bleRanging.stop();
     await _discovery.stop();
     _disturbanceTracker.reset();
+    _networkRfLinks.clear();
     if (!mounted) return;
     setState(() {
       _sessionRunning = false;
@@ -205,7 +273,7 @@ class _UniversalCompatibilityDashboardState
       _sessionError = null;
       _bleRangingStatus = 'idle';
       _mobileSensingReadyLatched = false;
-      _mobileSensingPeerIds = const {};
+      _calibrationNodeIds = const {};
       _lastValidationReport = finalReport;
     });
   }
@@ -340,6 +408,9 @@ class _UniversalCompatibilityDashboardState
                             'Transport status: ${_formatTransportStatuses(_discovery.transportPathStatuses)}',
                           ),
                           Text('BLE automatic ranging: $_bleRangingStatus'),
+                          Text(
+                            'Shared fresh RF streams: ${_freshRfSamples().length}',
+                          ),
                           const SizedBox(height: 8),
                           Wrap(
                             spacing: 8,
