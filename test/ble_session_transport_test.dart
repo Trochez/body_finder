@@ -30,6 +30,54 @@ void main() {
     await transport.stop();
   });
 
+  test('compresses repetitive telemetry before BLE fragmentation', () async {
+    final platform = _FakeBleSessionPlatformAdapter();
+    final transport = BleSessionTransport(
+      nodeId: 'aaaaaaaaaaaaaaaa',
+      platformAdapter: platform,
+    );
+    final received = <Uint8List>[];
+    await transport.start(onMessage: received.add);
+
+    final payload = Uint8List.fromList(
+      utf8.encode(
+        jsonEncode(<String, Object>{
+          'protocol': 'body_finder_peer_v1',
+          'nodeId': 'aaaaaaaaaaaaaaaa',
+          'platform': 'android',
+          'rfLinks': List<Object>.generate(
+            8,
+            (index) => <String, Object>{
+              'toNodeId': 'bbbbbbbbbbbbbbbb',
+              'rssiDbm': -60 - index,
+              'ageMillis': index * 100,
+            },
+          ),
+          'ranges': List<Object>.generate(
+            8,
+            (index) => <String, Object>{
+              'toNodeId': 'cccccccccccccccc',
+              'distanceMeters': 2.0 + index / 10,
+              'sigmaMeters': 1.5,
+              'source': 'bleRssi',
+            },
+          ),
+        }),
+      ),
+    );
+    final rawChunkCount = BleSessionFramer().fragment(payload).length;
+
+    await transport.broadcast(payload);
+
+    expect(platform.sentChunks.length, lessThan(rawChunkCount));
+    for (final chunk in platform.sentChunks) {
+      platform.emit('peer-telemetry', chunk);
+    }
+    expect(received, hasLength(1));
+    expect(received.single, orderedEquals(payload));
+    await transport.stop();
+  });
+
   test('failed platform start causes the BLE child transport to fail cleanly', () async {
     final platform = _FakeBleSessionPlatformAdapter(startStatus: 'unsupported');
     final transport = BleSessionTransport(

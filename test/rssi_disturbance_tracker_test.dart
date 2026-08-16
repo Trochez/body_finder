@@ -90,4 +90,66 @@ void main() {
 
     expect(tracker.snapshot().phase, DisturbancePhase.stale);
   });
+
+  test('stale RF stream contributes no evidence instead of freezing score', () {
+    final tracker = RssiDisturbanceTracker(minimumBaselineSamples: 5);
+    final start = DateTime(2026, 1, 1, 12);
+    tracker.startCalibration(const ['peer-a']);
+    for (var i = 0; i < 5; i++) {
+      tracker.addSample(
+        peerNodeId: 'peer-a',
+        rssiDbm: -60,
+        observedAt: start.add(Duration(milliseconds: i * 100)),
+      );
+    }
+    tracker.addSample(
+      peerNodeId: 'peer-a',
+      rssiDbm: -72,
+      observedAt: start.add(const Duration(seconds: 1)),
+    );
+
+    final fresh = tracker.snapshot(now: start.add(const Duration(seconds: 2)));
+    expect(fresh.hasFreshEvidence, isTrue);
+    expect(fresh.overallScore, greaterThan(0.5));
+
+    final stale = tracker.snapshot(now: start.add(const Duration(seconds: 5)));
+    expect(stale.links.single.isFresh, isFalse);
+    expect(stale.hasFreshEvidence, isFalse);
+    expect(stale.overallScore, 0);
+    expect(stale.overallQuality, 0);
+  });
+
+  test('reacquired RF stream restarts smoothing instead of carrying stale score', () {
+    final tracker = RssiDisturbanceTracker(minimumBaselineSamples: 5);
+    final start = DateTime(2026, 1, 1, 12);
+    tracker.startCalibration(const ['peer-a']);
+    for (var i = 0; i < 5; i++) {
+      tracker.addSample(
+        peerNodeId: 'peer-a',
+        rssiDbm: -60,
+        observedAt: start.add(Duration(milliseconds: i * 100)),
+      );
+    }
+    for (var i = 0; i < 5; i++) {
+      tracker.addSample(
+        peerNodeId: 'peer-a',
+        rssiDbm: -72,
+        observedAt: start.add(Duration(seconds: 1, milliseconds: i * 100)),
+      );
+    }
+    expect(
+      tracker.snapshot(now: start.add(const Duration(seconds: 2))).links.single.score,
+      greaterThan(0.7),
+    );
+
+    tracker.addSample(
+      peerNodeId: 'peer-a',
+      rssiDbm: -60,
+      observedAt: start.add(const Duration(seconds: 6)),
+    );
+
+    final recovered = tracker.snapshot(now: start.add(const Duration(seconds: 6)));
+    expect(recovered.links.single.isFresh, isTrue);
+    expect(recovered.links.single.score, lessThan(0.1));
+  });
 }
