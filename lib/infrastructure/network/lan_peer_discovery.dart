@@ -77,16 +77,15 @@ class LanPeerDiscovery {
   static const Duration peerTimeout = Duration(seconds: 10);
 
   /// A phone advertises another peer in its compact roster only while it has
-  /// recently received that peer's own heartbeat. Roster-derived peers are not
-  /// re-advertised, preventing stale membership from sustaining itself in a
-  /// loop after the originating phone disappears.
+  /// recently received that peer's own heartbeat or directly measured its
+  /// Body Finder BLE advertisement. Roster-derived peers are not re-advertised,
+  /// preventing stale membership from sustaining itself in a loop.
   static const Duration directRosterTimeout = Duration(seconds: 5);
   static const Duration rangeTimeout = Duration(seconds: 6);
 
   /// RF telemetry is intentionally much shorter lived than logical membership.
-  /// Only actual recent scanner measurements are included in the 1 Hz session
-  /// heartbeat; an old RSSI value is never refreshed merely because the session
-  /// itself remains connected.
+  /// Only actual recent scanner measurements are shared; an old RSSI value is
+  /// never refreshed merely because the session itself remains connected.
   static const Duration rfLinkTimeout = Duration(seconds: 3);
 
   final PeerDiscoveryListener? onChanged;
@@ -102,13 +101,14 @@ class LanPeerDiscovery {
   final Map<String, _ReceivedRange> _ranges = {};
   final Map<String, NetworkRfLinkSample> _localRfLinks = {};
 
-  /// Peers whose *own* heartbeat has been received by this node. This is kept
-  /// separate from the logical registry so an indirectly learned peer is never
-  /// re-gossiped indefinitely.
+  /// Peers whose own identity was observed directly, either in their session
+  /// heartbeat or in a physical Body Finder BLE advertisement/ranging sample.
+  /// Indirect roster entries are intentionally excluded from this map.
   final Map<String, _SelfOriginPeer> _selfOriginPeers = {};
 
   Timer? _announceTimer;
   Timer? _expireTimer;
+  int _announceSequence = 0;
 
   bool get isRunning => _transports.any((transport) => transport.isRunning);
 
@@ -198,6 +198,7 @@ class LanPeerDiscovery {
       );
     }
 
+    _announceSequence = 0;
     _refreshLocalRecord();
     _announce();
 
@@ -213,6 +214,7 @@ class LanPeerDiscovery {
     _expireTimer?.cancel();
     _announceTimer = null;
     _expireTimer = null;
+    _announceSequence = 0;
     _selfOriginPeers.clear();
     _localRfLinks.clear();
 
@@ -227,16 +229,34 @@ class LanPeerDiscovery {
     required double sigmaMeters,
     required RangeSource source,
   }) {
+    final normalizedPeerId = peerNodeId.toLowerCase();
+    final now = _nowMicros();
     final observation = RangeObservation(
       fromNodeId: nodeId,
-      toNodeId: peerNodeId,
+      toNodeId: normalizedPeerId,
       distanceMeters: distanceMeters,
       sigmaMeters: sigmaMeters,
-      timestampMicros: _nowMicros(),
+      timestampMicros: now,
       source: source,
     );
     if (!observation.isValid) return;
-    _localRanges[peerNodeId] = observation;
+
+    // A local BLE RSSI range exists only after the scanner has parsed a real
+    // Body Finder advertisement carrying that peer's persistent node ID. That
+    // physical sighting is therefore valid direct membership freshness even if
+    // a fragmented GATT session heartbeat is currently being lost. It remains
+    // distinct from transport connectivity and from any body/anomaly claim.
+    if (source == RangeSource.bleRssi &&
+        _isValidNodeId(normalizedPeerId) &&
+        normalizedPeerId != nodeId.toLowerCase()) {
+      _registry.seen(normalizedPeerId, now);
+      _selfOriginPeers[normalizedPeerId] = _SelfOriginPeer(
+        platform: null,
+        seenAtMicros: now,
+      );
+    }
+
+    _localRanges[normalizedPeerId] = observation;
     _storeRange(observation);
     _emit();
   }
@@ -261,8 +281,9 @@ class LanPeerDiscovery {
   }
 
   void clearLocalRange(String peerNodeId) {
-    _localRanges.remove(peerNodeId);
-    _ranges.remove(_rangeStorageKey(nodeId, peerNodeId));
+    final normalizedPeerId = peerNodeId.toLowerCase();
+    _localRanges.remove(normalizedPeerId);
+    _ranges.remove(_rangeStorageKey(nodeId, normalizedPeerId));
     _emit();
   }
 
@@ -300,21 +321,28 @@ class LanPeerDiscovery {
       final rawKnownPeers = decoded['knownPeers'];
       if (rawKnownPeers is List) {
         for (final rawPeer in rawKnownPeers) {
-          if (rawPeer is! Map) continue;
-          final peerNodeId = rawPeer['nodeId'];
-          if (peerNodeId is! String || !_isValidNodeId(peerNodeId)) continue;
+          String? peerNodeId;
+          String? peerPlatform;
+          if (rawPeer is String) {
+            peerNodeId = rawPeer;
+          } else if (rawPeer is Map) {
+            final rawId = rawPeer['nodeId'];
+            if (rawId is String) peerNodeId = rawId;
+            final rawPlatform = rawPeer['platform'];
+            if (rawPlatform is String && rawPlatform.isNotEmpty) {
+              peerPlatform = rawPlatform;
+            }
+          }
+          if (peerNodeId == null || !_isValidNodeId(peerNodeId)) continue;
           final normalizedPeerId = peerNodeId.toLowerCase();
           if (normalizedPeerId == nodeId.toLowerCase() ||
               normalizedPeerId == normalizedRemoteId) {
             continue;
           }
-          final peerPlatform = rawPeer['platform'];
           _registry.seen(
             normalizedPeerId,
             now,
-            platform: peerPlatform is String && peerPlatform.isNotEmpty
-                ? peerPlatform
-                : null,
+            platform: peerPlatform,
           );
         }
       }
@@ -363,19 +391,20 @@ class LanPeerDiscovery {
       _storeRange(refreshed);
     }
 
-    final knownPeers = _selfOriginPeers.entries
-        .map(
-          (entry) => <String, Object?>{
-            'nodeId': entry.key,
-            if (entry.value.platform != null)
-              'platform': entry.value.platform,
-          },
-        )
-        .toList(growable: false)
-      ..sort(
-        (left, right) =>
-            (left['nodeId']! as String).compareTo(right['nodeId']! as String),
-      );
+    // Keep the membership message deliberately small. BLE framing uses a
+    // 20-byte chunk ceiling; membership must not wait for a large range/RF
+    // payload to reassemble successfully.
+    final knownPeers = _selfOriginPeers.keys.toList(growable: false)..sort();
+    final membershipPayload = Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'protocol': protocol,
+          'nodeId': nodeId,
+          'platform': platform,
+          'knownPeers': knownPeers,
+        }),
+      ),
+    );
 
     final localRfLinks = _localRfLinks.values
         .map(
@@ -394,14 +423,12 @@ class LanPeerDiscovery {
             (left['toNodeId']! as String).compareTo(right['toNodeId']! as String),
       );
 
-    final payload = Uint8List.fromList(
+    final telemetryPayload = Uint8List.fromList(
       utf8.encode(
         jsonEncode({
           'protocol': protocol,
           'nodeId': nodeId,
           'platform': platform,
-          'timestampMicros': now,
-          'knownPeers': knownPeers,
           'ranges': refreshedLocalRanges
               .map(
                 (range) => {
@@ -417,10 +444,30 @@ class LanPeerDiscovery {
       ),
     );
 
+    // Membership goes every second. Bulk range/RF telemetry goes every second
+    // heartbeat so it cannot continuously dominate commodity-phone GATT queues.
+    final sendTelemetry = (_announceSequence++ % 2) == 0;
     for (final transport in _transports.where((value) => value.isRunning)) {
-      unawaited(transport.broadcast(payload));
+      unawaited(
+        _broadcastAnnouncement(
+          transport,
+          membershipPayload,
+          sendTelemetry ? telemetryPayload : null,
+        ),
+      );
     }
     _emit();
+  }
+
+  Future<void> _broadcastAnnouncement(
+    SessionTransport transport,
+    Uint8List membershipPayload,
+    Uint8List? telemetryPayload,
+  ) async {
+    await transport.broadcast(membershipPayload);
+    if (telemetryPayload != null && telemetryPayload.isNotEmpty) {
+      await transport.broadcast(telemetryPayload);
+    }
   }
 
   void _refreshLocalRecord() {
