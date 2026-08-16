@@ -148,6 +148,26 @@ class _OverallDisturbance extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!snapshot.hasFreshEvidence) {
+      return const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Shared RF disturbance index: UNAVAILABLE',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 20),
+          ),
+          SizedBox(height: 8),
+          LinearProgressIndicator(value: 0),
+          SizedBox(height: 8),
+          Text('Evidence quality: 0 / 100'),
+          SizedBox(height: 4),
+          Text(
+            'No calibrated RF stream is fresh right now. Waiting for BLE measurements to recover; the previous score is not carried forward.',
+          ),
+        ],
+      );
+    }
+
     final score = (snapshot.overallScore * 100).round();
     final quality = (snapshot.overallQuality * 100).round();
     return Column(
@@ -160,7 +180,9 @@ class _OverallDisturbance extends StatelessWidget {
         const SizedBox(height: 6),
         LinearProgressIndicator(value: snapshot.overallScore),
         const SizedBox(height: 8),
-        Text('Evidence quality: $quality / 100'),
+        Text(
+          'Evidence quality: $quality / 100 · ${snapshot.freshLinkCount}/${snapshot.links.length} calibrated streams fresh',
+        ),
         const SizedBox(height: 4),
         const Text(
           'Index = change from this session baseline, not probability of a body or survivor.',
@@ -190,17 +212,17 @@ class _LinkDisturbanceTile extends StatelessWidget {
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             ),
-            Text('$score / 100'),
+            Text(link.isFresh ? '$score / 100' : 'STALE'),
           ],
         ),
         const SizedBox(height: 4),
-        LinearProgressIndicator(value: link.score),
+        LinearProgressIndicator(value: link.isFresh ? link.score : 0),
         const SizedBox(height: 4),
         Text(
           'RSSI ${link.rssiDbm.toStringAsFixed(1)} dBm · baseline '
           '${link.baselineRssiDbm.toStringAsFixed(1)} dBm · '
           'noise σ ${link.baselineSigmaDb.toStringAsFixed(1)} dB · '
-          '${ageSeconds.toStringAsFixed(1)} s old',
+          '${ageSeconds.toStringAsFixed(1)} s old${link.isFresh ? '' : ' · waiting for fresh BLE data'}',
         ),
       ],
     );
