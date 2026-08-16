@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+const Duration disturbanceFreshnessTimeout = Duration(seconds: 3);
+
 enum DisturbancePhase {
   idle,
   calibrating,
@@ -35,6 +37,8 @@ class LinkDisturbance {
   final double quality;
   final int sampleCount;
   final Duration age;
+
+  bool get isFresh => age <= disturbanceFreshnessTimeout;
 }
 
 class RssiDisturbanceSnapshot {
@@ -57,6 +61,8 @@ class RssiDisturbanceSnapshot {
   final double overallQuality;
 
   bool get baselineReady => phase == DisturbancePhase.monitoring;
+  int get freshLinkCount => links.where((link) => link.isFresh).length;
+  bool get hasFreshEvidence => freshLinkCount > 0;
 }
 
 /// Tracks changes in BLE RSSI relative to an explicitly captured baseline.
@@ -128,6 +134,10 @@ class RssiDisturbanceTracker {
     if (!_requiredPeerIds.contains(peerNodeId) || !rssiDbm.isFinite) return;
     final state = _links.putIfAbsent(peerNodeId, _LinkState.new);
     final now = observedAt ?? DateTime.now();
+    final previousAt = state.latestAt;
+    final recoveredFromStaleGap = previousAt != null &&
+        now.difference(previousAt) > disturbanceFreshnessTimeout;
+
     state.latestRssi = rssiDbm;
     state.latestAt = now;
 
@@ -152,6 +162,15 @@ class RssiDisturbanceTracker {
     }
 
     if (_phase != DisturbancePhase.monitoring || !state.baselineReady) return;
+
+    // A stream that disappears long enough to become stale must not resume by
+    // blending a new reading with a frozen pre-dropout score. Keep the captured
+    // baseline, but restart short-window/smoothing state on reacquisition.
+    if (recoveredFromStaleGap) {
+      state.recentSamples.clear();
+      state.smoothedScore = 0;
+      state.scoredSamples = 0;
+    }
 
     state.recentSamples.add(rssiDbm);
     if (state.recentSamples.length > recentWindowSize) {
@@ -227,8 +246,7 @@ class RssiDisturbanceTracker {
     var weightedQuality = 0.0;
     var qualityWeight = 0.0;
     for (final link in outputs) {
-      final fresh = link.age <= const Duration(seconds: 3);
-      final q = fresh ? link.quality : 0.0;
+      final q = link.isFresh ? link.quality : 0.0;
       combinedNoEvidence *= 1 - link.score * q;
       weightedQuality += q;
       qualityWeight += 1;
