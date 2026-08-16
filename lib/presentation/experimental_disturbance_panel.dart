@@ -34,7 +34,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Experimental RF disturbance',
+                    'Collective experimental RF disturbance',
                     style: theme.textTheme.titleMedium,
                   ),
                 ),
@@ -43,13 +43,13 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             const Text(
-              'Compares live BLE RSSI against a baseline captured with the phones fixed in place. '
+              'Combines direct BLE RSSI measurements reported by the phones in this session and compares them with a fixed-scene baseline. '
               'This measures RF change only; it is not proof that a person is present. A quiet result never proves absence.',
             ),
             const SizedBox(height: 16),
             if (!sensingReady && snapshot.phase == DisturbancePhase.idle) ...[
               const Text(
-                'Waiting for a stable 3-phone BLE session. The metric map may fluctuate and is not required for RF baseline calibration.',
+                'Waiting for 3 phones plus at least two fresh physical RF edges covering the three devices. The metric map is not required for RF baseline calibration.',
               ),
             ] else if (snapshot.phase == DisturbancePhase.idle ||
                 snapshot.phase == DisturbancePhase.stale) ...[
@@ -65,13 +65,13 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 child: FilledButton.icon(
                   onPressed: onCalibrate,
                   icon: const Icon(Icons.tune),
-                  label: const Text('Calibrate RF baseline'),
+                  label: const Text('Calibrate shared RF baseline'),
                 ),
               ),
               const SizedBox(height: 8),
               const Text(
                 'Keep all phones fixed and keep the scene as unchanged as possible during calibration. '
-                'The button remains available even if the BLE metric map briefly reconverges. '
+                'Calibration uses the fresh RF streams currently shared by the mesh. '
                 'A person already present during calibration may become part of the baseline.',
               ),
             ] else if (snapshot.phase == DisturbancePhase.calibrating) ...[
@@ -83,7 +83,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               LinearProgressIndicator(value: snapshot.baselineProgress),
               const SizedBox(height: 8),
               const Text(
-                'Calibration will switch to monitoring automatically when every calibrated BLE link has enough samples.',
+                'Calibration switches to monitoring automatically when every selected shared RF stream has enough samples.',
               ),
             ] else ...[
               Container(
@@ -103,7 +103,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'MONITORING ACTIVE — no extra button is required. Keep the phones fixed while observing the RF disturbance index.',
+                        'MONITORING ACTIVE — shared RF streams are being scored automatically. Keep all phones fixed.',
                         style: theme.textTheme.titleSmall?.copyWith(
                           color: theme.colorScheme.onPrimaryContainer,
                         ),
@@ -116,7 +116,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               _OverallDisturbance(snapshot: snapshot),
               const SizedBox(height: 16),
               if (snapshot.links.isEmpty)
-                const Text('Waiting for fresh BLE RSSI samples…')
+                const Text('Waiting for fresh shared BLE RSSI samples…')
               else
                 ...snapshot.links.map(
                   (link) => Padding(
@@ -130,7 +130,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 child: OutlinedButton.icon(
                   onPressed: onCalibrate,
                   icon: const Icon(Icons.restart_alt),
-                  label: const Text('Capture a new baseline'),
+                  label: const Text('Capture a new shared baseline'),
                 ),
               ),
             ],
@@ -154,7 +154,7 @@ class _OverallDisturbance extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'RF disturbance index: $score / 100',
+          'Shared RF disturbance index: $score / 100',
           style: Theme.of(context).textTheme.titleLarge,
         ),
         const SizedBox(height: 6),
@@ -177,9 +177,6 @@ class _LinkDisturbanceTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shortId = link.peerNodeId.length <= 8
-        ? link.peerNodeId
-        : link.peerNodeId.substring(0, 8);
     final score = (link.score * 100).round();
     final ageSeconds = link.age.inMilliseconds / 1000;
     return Column(
@@ -189,7 +186,7 @@ class _LinkDisturbanceTile extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                'Link → $shortId',
+                _linkLabel(link.peerNodeId),
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             ),
@@ -208,6 +205,17 @@ class _LinkDisturbanceTile extends StatelessWidget {
       ],
     );
   }
+
+  static String _linkLabel(String value) {
+    final parts = value.split('->');
+    if (parts.length == 2) {
+      return 'RF ${_shortId(parts[0])} → ${_shortId(parts[1])}';
+    }
+    return 'RF ${_shortId(value)}';
+  }
+
+  static String _shortId(String value) =>
+      value.length <= 8 ? value : value.substring(0, 8);
 }
 
 class _PhaseChip extends StatelessWidget {

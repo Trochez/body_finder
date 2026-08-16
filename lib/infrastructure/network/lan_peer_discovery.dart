@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import '../../application/geometry/bootstrap_layout_solver.dart';
 import '../../application/geometry/relative_position_solver.dart';
+import '../../application/sensing/network_rf_link_sample.dart';
 import '../../application/session/coordinator_election.dart';
 import '../../application/session/peer_registry.dart';
 import '../../domain/geometry/range_observation.dart';
@@ -44,6 +45,7 @@ class PeerDiscoverySnapshot {
 }
 
 typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
+typedef RfLinkSampleListener = void Function(NetworkRfLinkSample sample);
 
 /// Session membership, coordinator election and shared range-graph engine.
 ///
@@ -54,10 +56,12 @@ typedef PeerDiscoveryListener = void Function(PeerDiscoverySnapshot snapshot);
 class LanPeerDiscovery {
   LanPeerDiscovery({
     PeerDiscoveryListener? onChanged,
+    RfLinkSampleListener? onRfLinkSample,
     String? nodeId,
     String? platform,
     List<SessionTransport>? transports,
   })  : onChanged = onChanged,
+        onRfLinkSample = onRfLinkSample,
         nodeId = nodeId ?? _newNodeId(),
         platform = platform ?? Platform.operatingSystem,
         _transports =
@@ -79,7 +83,14 @@ class LanPeerDiscovery {
   static const Duration directRosterTimeout = Duration(seconds: 5);
   static const Duration rangeTimeout = Duration(seconds: 6);
 
+  /// RF telemetry is intentionally much shorter lived than logical membership.
+  /// Only actual recent scanner measurements are included in the 1 Hz session
+  /// heartbeat; an old RSSI value is never refreshed merely because the session
+  /// itself remains connected.
+  static const Duration rfLinkTimeout = Duration(seconds: 3);
+
   final PeerDiscoveryListener? onChanged;
+  final RfLinkSampleListener? onRfLinkSample;
   final String nodeId;
   final String platform;
   final List<SessionTransport> _transports;
@@ -89,6 +100,7 @@ class LanPeerDiscovery {
       const BootstrapLayoutSolver();
   final Map<String, RangeObservation> _localRanges = {};
   final Map<String, _ReceivedRange> _ranges = {};
+  final Map<String, NetworkRfLinkSample> _localRfLinks = {};
 
   /// Peers whose *own* heartbeat has been received by this node. This is kept
   /// separate from the logical registry so an indirectly learned peer is never
@@ -202,6 +214,7 @@ class LanPeerDiscovery {
     _announceTimer = null;
     _expireTimer = null;
     _selfOriginPeers.clear();
+    _localRfLinks.clear();
 
     for (final transport in _transports) {
       await transport.stop();
@@ -226,6 +239,25 @@ class LanPeerDiscovery {
     _localRanges[peerNodeId] = observation;
     _storeRange(observation);
     _emit();
+  }
+
+  /// Publishes a directly observed RSSI sample for collective RF sensing.
+  /// This is separate from metric ranging: RSSI telemetry describes the actual
+  /// RF change seen by this scanner and is never synthesized for indirect peers.
+  void publishLocalRfLink({
+    required String peerNodeId,
+    required double rssiDbm,
+    DateTime? observedAt,
+  }) {
+    final sample = NetworkRfLinkSample(
+      fromNodeId: nodeId.toLowerCase(),
+      toNodeId: peerNodeId.toLowerCase(),
+      rssiDbm: rssiDbm,
+      observedAt: observedAt ?? DateTime.now(),
+    );
+    if (!sample.isValid) return;
+    _localRfLinks[sample.toNodeId] = sample;
+    onRfLinkSample?.call(sample);
   }
 
   void clearLocalRange(String peerNodeId) {
@@ -294,6 +326,14 @@ class LanPeerDiscovery {
           if (observation != null) _storeRange(observation);
         }
       }
+
+      final rawRfLinks = decoded['rfLinks'];
+      if (rawRfLinks is List) {
+        for (final rawRfLink in rawRfLinks) {
+          final sample = _decodeRfLink(normalizedRemoteId, rawRfLink);
+          if (sample != null) onRfLinkSample?.call(sample);
+        }
+      }
       _emit();
     } on FormatException {
       // Ignore unrelated or malformed traffic from any session transport.
@@ -306,6 +346,7 @@ class LanPeerDiscovery {
     _refreshLocalRecord();
     final now = _nowMicros();
     _expireSelfOriginPeers(now);
+    _expireLocalRfLinks(now);
 
     final refreshedLocalRanges = <RangeObservation>[];
     for (final entry in _localRanges.entries.toList(growable: false)) {
@@ -336,6 +377,23 @@ class LanPeerDiscovery {
             (left['nodeId']! as String).compareTo(right['nodeId']! as String),
       );
 
+    final localRfLinks = _localRfLinks.values
+        .map(
+          (sample) => <String, Object>{
+            'toNodeId': sample.toNodeId,
+            'rssiDbm': sample.rssiDbm,
+            'ageMillis': max(
+              0,
+              DateTime.now().difference(sample.observedAt).inMilliseconds,
+            ),
+          },
+        )
+        .toList(growable: false)
+      ..sort(
+        (left, right) =>
+            (left['toNodeId']! as String).compareTo(right['toNodeId']! as String),
+      );
+
     final payload = Uint8List.fromList(
       utf8.encode(
         jsonEncode({
@@ -354,6 +412,7 @@ class LanPeerDiscovery {
                 },
               )
               .toList(growable: false),
+          'rfLinks': localRfLinks,
         }),
       ),
     );
@@ -375,6 +434,7 @@ class LanPeerDiscovery {
   void _expireStaleState() {
     final now = _nowMicros();
     _expireSelfOriginPeers(now);
+    _expireLocalRfLinks(now);
     final expired =
         _registry.expireBefore(now - peerTimeout.inMicroseconds);
     final activeIds = _registry.peers.map((peer) => peer.id).toSet()..add(nodeId);
@@ -393,6 +453,7 @@ class LanPeerDiscovery {
     }
     for (final peerId in expired) {
       _localRanges.remove(peerId);
+      _localRfLinks.remove(peerId);
       _selfOriginPeers.remove(peerId);
     }
     _refreshLocalRecord();
@@ -402,6 +463,13 @@ class LanPeerDiscovery {
   void _expireSelfOriginPeers(int nowMicros) {
     final cutoff = nowMicros - directRosterTimeout.inMicroseconds;
     _selfOriginPeers.removeWhere((_, value) => value.seenAtMicros < cutoff);
+  }
+
+  void _expireLocalRfLinks(int nowMicros) {
+    final cutoff = nowMicros - rfLinkTimeout.inMicroseconds;
+    _localRfLinks.removeWhere(
+      (_, sample) => sample.observedAt.microsecondsSinceEpoch < cutoff,
+    );
   }
 
   void _storeRange(RangeObservation observation) {
@@ -437,6 +505,33 @@ class LanPeerDiscovery {
       source: source,
     );
     return observation.isValid ? observation : null;
+  }
+
+  NetworkRfLinkSample? _decodeRfLink(String remoteNodeId, Object? raw) {
+    if (raw is! Map) return null;
+    final toNodeId = raw['toNodeId'];
+    final rssi = raw['rssiDbm'];
+    final ageMillis = raw['ageMillis'];
+    if (toNodeId is! String ||
+        !_isValidNodeId(toNodeId) ||
+        rssi is! num ||
+        ageMillis is! num) {
+      return null;
+    }
+    final boundedAgeMillis = ageMillis.toInt().clamp(0, 5000);
+    final sample = NetworkRfLinkSample(
+      fromNodeId: remoteNodeId,
+      toNodeId: toNodeId.toLowerCase(),
+      rssiDbm: rssi.toDouble(),
+      observedAt: DateTime.now().subtract(
+        Duration(milliseconds: boundedAgeMillis),
+      ),
+    );
+    if (!sample.isValid ||
+        DateTime.now().difference(sample.observedAt) > rfLinkTimeout) {
+      return null;
+    }
+    return sample;
   }
 
   static bool _isValidNodeId(String value) =>
