@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'ble_session_framer.dart';
@@ -49,10 +50,11 @@ abstract interface class BleSessionPeerIdentityBinder {
 /// a separate adapter and is the physical measurement source; merely carrying
 /// session bytes over BLE never creates a range or anomaly observation.
 ///
-/// Peer discovery assistance belongs in the session payload as a compact roster
-/// rather than by re-broadcasting every complete heartbeat across BLE. Keeping
-/// this layer point-to-point prevents fragmented heartbeat amplification from
-/// congesting Android GATT write/notification queues.
+/// Payloads are opportunistically zlib-compressed before 20-byte BLE framing.
+/// This is especially useful for repetitive JSON range/RF telemetry and reduces
+/// the number of GATT operations required to deliver one logical update. Small
+/// payloads remain raw when compression would not make them smaller. Receivers
+/// continue to accept legacy raw payloads.
 class BleSessionTransport implements SessionTransport {
   BleSessionTransport({
     required this.nodeId,
@@ -62,6 +64,8 @@ class BleSessionTransport implements SessionTransport {
   })  : _platformAdapter = platformAdapter,
         _framer = framer ?? BleSessionFramer(),
         _reassembler = reassembler ?? BleSessionReassembler();
+
+  static const List<int> _compressedEnvelope = <int>[0x42, 0x46, 0x5a, 0x01];
 
   final String nodeId;
   final BleSessionPlatformAdapter _platformAdapter;
@@ -107,7 +111,8 @@ class BleSessionTransport implements SessionTransport {
   @override
   Future<void> broadcast(Uint8List payload) async {
     if (!isRunning || payload.isEmpty) return;
-    for (final chunk in _framer.fragment(payload)) {
+    final wirePayload = _encodeWirePayload(payload);
+    for (final chunk in _framer.fragment(wirePayload)) {
       await _platformAdapter.sendChunk(chunk);
     }
   }
@@ -122,10 +127,13 @@ class BleSessionTransport implements SessionTransport {
   }
 
   void _handleChunk(BleSessionChunk incoming) {
-    final complete = _reassembler.accept(
+    final wirePayload = _reassembler.accept(
       sourceKey: incoming.sourceKey,
       chunk: incoming.bytes,
     );
+    if (wirePayload == null) return;
+
+    final complete = _decodeWirePayload(wirePayload);
     if (complete == null) return;
 
     if (_platformAdapter is BleSessionPeerIdentityBinder) {
@@ -139,6 +147,36 @@ class BleSessionTransport implements SessionTransport {
       }
     }
     _onMessage?.call(complete);
+  }
+
+  static Uint8List _encodeWirePayload(Uint8List payload) {
+    if (payload.isEmpty) return payload;
+    final compressed = zlib.encode(payload);
+    if (compressed.length + _compressedEnvelope.length >= payload.length) {
+      return payload;
+    }
+    return Uint8List.fromList(<int>[..._compressedEnvelope, ...compressed]);
+  }
+
+  static Uint8List? _decodeWirePayload(Uint8List payload) {
+    if (!_hasCompressedEnvelope(payload)) return payload;
+    try {
+      return Uint8List.fromList(
+        zlib.decode(payload.sublist(_compressedEnvelope.length)),
+      );
+    } on FormatException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static bool _hasCompressedEnvelope(Uint8List payload) {
+    if (payload.length <= _compressedEnvelope.length) return false;
+    for (var index = 0; index < _compressedEnvelope.length; index++) {
+      if (payload[index] != _compressedEnvelope[index]) return false;
+    }
+    return true;
   }
 
   void _setStatus(String value) {
