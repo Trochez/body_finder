@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:body_finder/application/sensing/network_rf_link_sample.dart';
 import 'package:body_finder/infrastructure/network/lan_peer_discovery.dart';
 import 'package:body_finder/infrastructure/network/session_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,6 +74,55 @@ void main() {
     expect(c.snapshot.nodeCount, 3);
     expect(a.snapshot.peers.map((peer) => peer.id), contains('cccccccccccccccc'));
     expect(c.snapshot.peers.map((peer) => peer.id), contains('aaaaaaaaaaaaaaaa'));
+
+    await a.stop();
+    await b.stop();
+    await c.stop();
+  });
+
+  test('direct RF telemetry is shared in normal heartbeat without A-C delivery', () async {
+    final bus = _LinkedMemoryBus()
+      ..connect('a', 'b')
+      ..connect('b', 'c');
+    final receivedAtA = <NetworkRfLinkSample>[];
+
+    final a = LanPeerDiscovery(
+      nodeId: 'aaaaaaaaaaaaaaaa',
+      platform: 'android',
+      onRfLinkSample: receivedAtA.add,
+      transports: <SessionTransport>[_LinkedMemoryTransport(bus, 'a')],
+    );
+    final b = LanPeerDiscovery(
+      nodeId: 'bbbbbbbbbbbbbbbb',
+      platform: 'android',
+      transports: <SessionTransport>[_LinkedMemoryTransport(bus, 'b')],
+    );
+    final c = LanPeerDiscovery(
+      nodeId: 'cccccccccccccccc',
+      platform: 'android',
+      transports: <SessionTransport>[_LinkedMemoryTransport(bus, 'c')],
+    );
+
+    await a.start();
+    await b.start();
+    await c.start();
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+
+    b.publishLocalRfLink(
+      peerNodeId: 'cccccccccccccccc',
+      rssiDbm: -71.5,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+
+    final matching = receivedAtA.where(
+      (sample) =>
+          sample.fromNodeId == 'bbbbbbbbbbbbbbbb' &&
+          sample.toNodeId == 'cccccccccccccccc',
+    );
+    expect(matching, isNotEmpty);
+    expect(matching.last.rssiDbm, closeTo(-71.5, 0.01));
+    expect(bus.directDeliveries('c', 'a'), 0);
+    expect(bus.directDeliveries('a', 'c'), 0);
 
     await a.stop();
     await b.stop();
