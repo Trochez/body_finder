@@ -1,8 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../application/sensing/rssi_disturbance_tracker.dart';
 
-class ExperimentalDisturbancePanel extends StatelessWidget {
+class ExperimentalDisturbancePanel extends StatefulWidget {
   const ExperimentalDisturbancePanel({
     super.key,
     required this.snapshot,
@@ -20,8 +22,47 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
   final VoidCallback? onCalibrate;
 
   @override
+  State<ExperimentalDisturbancePanel> createState() =>
+      _ExperimentalDisturbancePanelState();
+}
+
+class _ExperimentalDisturbancePanelState
+    extends State<ExperimentalDisturbancePanel> {
+  Timer? _freshnessTimer;
+  DateTime _snapshotReceivedAt = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _freshnessTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && widget.snapshot.phase == DisturbancePhase.monitoring) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant ExperimentalDisturbancePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.snapshot, widget.snapshot)) {
+      _snapshotReceivedAt = DateTime.now();
+    }
+  }
+
+  @override
+  void dispose() {
+    _freshnessTimer?.cancel();
+    super.dispose();
+  }
+
+  Duration get _elapsedSinceSnapshot =>
+      DateTime.now().difference(_snapshotReceivedAt);
+
+  @override
   Widget build(BuildContext context) {
+    final snapshot = widget.snapshot;
     final theme = Theme.of(context);
+    final elapsed = _elapsedSinceSnapshot;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -47,7 +88,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               'This measures RF change only; it is not proof that a person is present. A quiet result never proves absence.',
             ),
             const SizedBox(height: 16),
-            if (!sensingReady && snapshot.phase == DisturbancePhase.idle) ...[
+            if (!widget.sensingReady && snapshot.phase == DisturbancePhase.idle) ...[
               const Text(
                 'Waiting for 3 phones plus at least two fresh physical RF edges covering the three devices. The metric map is not required for RF baseline calibration.',
               ),
@@ -63,7 +104,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: onCalibrate,
+                  onPressed: widget.onCalibrate,
                   icon: const Icon(Icons.tune),
                   label: const Text('Calibrate shared RF baseline'),
                 ),
@@ -113,7 +154,7 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              _OverallDisturbance(snapshot: snapshot),
+              _OverallDisturbance(snapshot: snapshot, elapsed: elapsed),
               const SizedBox(height: 16),
               if (snapshot.links.isEmpty)
                 const Text('Waiting for fresh shared BLE RSSI samples…')
@@ -121,14 +162,17 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
                 ...snapshot.links.map(
                   (link) => Padding(
                     padding: const EdgeInsets.only(bottom: 12),
-                    child: _LinkDisturbanceTile(link: link),
+                    child: _LinkDisturbanceTile(
+                      link: link,
+                      elapsed: elapsed,
+                    ),
                   ),
                 ),
               const Divider(),
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
-                  onPressed: onCalibrate,
+                  onPressed: widget.onCalibrate,
                   icon: const Icon(Icons.restart_alt),
                   label: const Text('Capture a new shared baseline'),
                 ),
@@ -142,13 +186,25 @@ class ExperimentalDisturbancePanel extends StatelessWidget {
 }
 
 class _OverallDisturbance extends StatelessWidget {
-  const _OverallDisturbance({required this.snapshot});
+  const _OverallDisturbance({required this.snapshot, required this.elapsed});
 
   final RssiDisturbanceSnapshot snapshot;
+  final Duration elapsed;
 
   @override
   Widget build(BuildContext context) {
-    if (!snapshot.hasFreshEvidence) {
+    var combinedNoEvidence = 1.0;
+    var weightedQuality = 0.0;
+    var freshCount = 0;
+    for (final link in snapshot.links) {
+      final fresh = link.age + elapsed <= disturbanceFreshnessTimeout;
+      final quality = fresh ? link.quality : 0.0;
+      if (fresh) freshCount++;
+      combinedNoEvidence *= 1 - link.score * quality;
+      weightedQuality += quality;
+    }
+
+    if (freshCount == 0) {
       return const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -168,8 +224,12 @@ class _OverallDisturbance extends StatelessWidget {
       );
     }
 
-    final score = (snapshot.overallScore * 100).round();
-    final quality = (snapshot.overallQuality * 100).round();
+    final effectiveScore = (1 - combinedNoEvidence).clamp(0.0, 1.0);
+    final effectiveQuality = snapshot.links.isEmpty
+        ? 0.0
+        : (weightedQuality / snapshot.links.length).clamp(0.0, 1.0);
+    final score = (effectiveScore * 100).round();
+    final quality = (effectiveQuality * 100).round();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -178,10 +238,10 @@ class _OverallDisturbance extends StatelessWidget {
           style: Theme.of(context).textTheme.titleLarge,
         ),
         const SizedBox(height: 6),
-        LinearProgressIndicator(value: snapshot.overallScore),
+        LinearProgressIndicator(value: effectiveScore),
         const SizedBox(height: 8),
         Text(
-          'Evidence quality: $quality / 100 · ${snapshot.freshLinkCount}/${snapshot.links.length} calibrated streams fresh',
+          'Evidence quality: $quality / 100 · $freshCount/${snapshot.links.length} calibrated streams fresh',
         ),
         const SizedBox(height: 4),
         const Text(
@@ -193,14 +253,17 @@ class _OverallDisturbance extends StatelessWidget {
 }
 
 class _LinkDisturbanceTile extends StatelessWidget {
-  const _LinkDisturbanceTile({required this.link});
+  const _LinkDisturbanceTile({required this.link, required this.elapsed});
 
   final LinkDisturbance link;
+  final Duration elapsed;
 
   @override
   Widget build(BuildContext context) {
     final score = (link.score * 100).round();
-    final ageSeconds = link.age.inMilliseconds / 1000;
+    final effectiveAge = link.age + elapsed;
+    final isFresh = effectiveAge <= disturbanceFreshnessTimeout;
+    final ageSeconds = effectiveAge.inMilliseconds / 1000;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -212,17 +275,17 @@ class _LinkDisturbanceTile extends StatelessWidget {
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             ),
-            Text(link.isFresh ? '$score / 100' : 'STALE'),
+            Text(isFresh ? '$score / 100' : 'STALE'),
           ],
         ),
         const SizedBox(height: 4),
-        LinearProgressIndicator(value: link.isFresh ? link.score : 0),
+        LinearProgressIndicator(value: isFresh ? link.score : 0),
         const SizedBox(height: 4),
         Text(
           'RSSI ${link.rssiDbm.toStringAsFixed(1)} dBm · baseline '
           '${link.baselineRssiDbm.toStringAsFixed(1)} dBm · '
           'noise σ ${link.baselineSigmaDb.toStringAsFixed(1)} dB · '
-          '${ageSeconds.toStringAsFixed(1)} s old${link.isFresh ? '' : ' · waiting for fresh BLE data'}',
+          '${ageSeconds.toStringAsFixed(1)} s old${isFresh ? '' : ' · waiting for fresh BLE data'}',
         ),
       ],
     );
