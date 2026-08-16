@@ -19,6 +19,9 @@ class LinkDisturbance {
     required this.age,
   });
 
+  /// Identifier of the monitored RF stream. Historically this was a peer node
+  /// id for local-only sensing; collective sensing may use a directed link id
+  /// such as `fromNodeId->toNodeId` while retaining source compatibility.
   final String peerNodeId;
   final double rssiDbm;
   final double baselineRssiDbm;
@@ -95,6 +98,13 @@ class RssiDisturbanceTracker {
     for (final peer in peers) {
       _links[peer] = _LinkState();
     }
+  }
+
+  /// Explicitly invalidates a captured baseline when the surrounding topology
+  /// changes. This is useful for collective sensing where tracked identifiers
+  /// are directed RF links rather than the logical peer ids themselves.
+  void markStale() {
+    if (_phase != DisturbancePhase.idle) _phase = DisturbancePhase.stale;
   }
 
   /// Keeps a captured baseline across temporary BLE/session dropouts from the
